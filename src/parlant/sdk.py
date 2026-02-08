@@ -3874,6 +3874,7 @@ class Server:
                                     tool_name=retriever_id,
                                 ).to_string(),
                                 arguments={},
+                                rationale="Retriever result",
                                 result=_SessionToolResult(
                                     data=result.data,
                                     metadata=result.metadata,
