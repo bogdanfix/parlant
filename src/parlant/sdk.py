@@ -4626,9 +4626,11 @@ class Server:
                 )
 
             mongo_client: object | None = None
+            mongo_db: DocumentDatabase | None = None
 
-            async def make_mongo_db(url: str, name: str) -> DocumentDatabase:
+            async def make_mongo_db(url: str) -> DocumentDatabase:
                 nonlocal mongo_client
+                nonlocal mongo_db
 
                 if importlib.util.find_spec("pymongo") is None:
                     raise SDKError(
@@ -4644,15 +4646,18 @@ class Server:
                         AsyncMongoClient[Any](url)
                     )
 
-                db = await self._exit_stack.enter_async_context(
-                    MongoDocumentDatabase(
-                        mongo_client=cast(AsyncMongoClient[Any], mongo_client),
-                        database_name=f"parlant_{name}",
-                        logger=c()[Logger],
+                if mongo_db is None:
+                    mongo_db = await self._exit_stack.enter_async_context(
+                        MongoDocumentDatabase(
+                            mongo_client=cast(AsyncMongoClient[Any], mongo_client),
+                            database_name="parlant",
+                            logger=c()[Logger],
+                        )
                     )
-                )
 
-                return db
+                assert mongo_db
+
+                return mongo_db
 
             async def make_persistable_store(t: type[T], spec: str, name: str, **kwargs: Any) -> T:
                 store: T
@@ -4678,8 +4683,9 @@ class Server:
                 elif spec.startswith("mongodb://") or spec.startswith("mongodb+srv://"):
                     store = await self._exit_stack.enter_async_context(
                         t(
-                            database=await make_mongo_db(spec, name),
+                            database=await make_mongo_db(spec),
                             allow_migration=self._migrate,
+                            collections_prefix=name,
                             **kwargs,
                         )  # type: ignore
                     )
@@ -4731,6 +4737,7 @@ class Server:
                     tracer=c()[Tracer],
                     nlp_services_provider=lambda: {"__nlp__": c()[NLPService]},
                     allow_migration=False,
+                    collections_prefix="services",
                 )
             )
 
