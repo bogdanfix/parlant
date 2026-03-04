@@ -1,4 +1,13 @@
-export const BASE_URL = import.meta.env.VITE_BASE_URL || '';
+const getBasePath = (): string => {
+  const path = window.location.pathname;
+  // Extract everything before /chat, /docs, /api
+  const match = path.match(/^(\/[^/]+)(?:\/(?:chat|docs|api))?/);
+  return match && !['chat', 'docs', 'api'].includes(match[1].
+
+slice(1)) ? match[1] : '';
+};
+
+export const BASE_URL = import.meta.env.VITE_BASE_URL || getBasePath();
 
 const request = async (url: string, options: RequestInit = {}) => {
 	try {
