@@ -1,4 +1,4 @@
-const getBasePath = (): string => {
+export const getBasePath = (): string => {
   const path = window.location.pathname;
   // Extract everything before /chat, /docs, /api
   const match = path.match(/^(\/[^/]+)(?:\/(?:chat|docs|api))?/);

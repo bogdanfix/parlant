@@ -3,12 +3,12 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 import {Toaster} from './components/ui/sonner.tsx';
-import { BASE_URL } from './utils/api.ts';
+import { getBasePath } from './utils/api.ts';
 
 // Dynamically set favicon using BASE_URL
 const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
 if (favicon) {
-  favicon.href = `${BASE_URL}/logo-color.svg`;
+  favicon.href = `${getBasePath()}/chat/logo-color.svg`;
 }
 
 createRoot(document.getElementById('root')!).render(
