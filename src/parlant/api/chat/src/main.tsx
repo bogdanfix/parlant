@@ -5,11 +5,12 @@ import './index.css';
 import {Toaster} from './components/ui/sonner.tsx';
 import { getBasePath } from './utils/api.ts';
 
-// Dynamically set favicon using BASE_URL
-const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-if (favicon) {
-  favicon.href = `${getBasePath()}/chat/logo-color.svg`;
-}
+// Dynamically create favicon using BASE_URL
+const favicon = document.createElement('link');
+favicon.rel = 'icon';
+favicon.type = 'image/svg+xml';
+favicon.href = `${getBasePath()}/chat/logo-color.svg`;
+document.head.appendChild(favicon);
 
 createRoot(document.getElementById('root')!).render(
     <StrictMode>
