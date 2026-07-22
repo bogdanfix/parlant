@@ -15,6 +15,7 @@
 from abc import ABC, abstractmethod
 import asyncio
 from collections import defaultdict
+import time
 from typing import Any, Coroutine, Callable, Optional, TypeAlias, TypeVar, Union
 
 R = TypeVar("R")
@@ -74,6 +75,42 @@ class RetryPolicy(Policy):
                 ]
 
                 await asyncio.sleep(wait_time)
+
+
+class RateLimitPolicy(Policy):
+    def __init__(
+        self,
+        max_requests: int,
+        per_seconds: float = 60.0,
+    ) -> None:
+        self.max_requests = max_requests
+        self.per_seconds = per_seconds
+        self._timestamps: list[float] = []
+        self._lock = asyncio.Lock()
+
+    async def apply(
+        self,
+        state: FunctionCallState,
+        func: Callable[..., Coroutine[Any, Any, R]],
+        *args: Any,
+        **kwargs: Any,
+    ) -> R:
+        if self.max_requests <= 0:
+            return await func(state, *args, **kwargs)
+
+        async with self._lock:
+            now = time.monotonic()
+            self._timestamps = [t for t in self._timestamps if now - t < self.per_seconds]
+            if len(self._timestamps) >= self.max_requests:
+                sleep_time = self._timestamps[0] + self.per_seconds - now
+            else:
+                sleep_time = 0.0
+            self._timestamps.append(now)
+
+        if sleep_time > 0:
+            await asyncio.sleep(sleep_time)
+
+        return await func(state, *args, **kwargs)
 
 
 def retry(
