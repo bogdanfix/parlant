@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import time
 from typing import Any, AsyncIterator, Callable, Mapping, cast
 from typing_extensions import override
 from lagom import Container
@@ -39,7 +40,7 @@ from parlant.core.nlp.generation import (
     StreamingTextGenerator,
 )
 from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
-from parlant.core.nlp.policies import policy, retry
+from parlant.core.nlp.policies import RateLimitPolicy, policy, retry
 from parlant.core.nlp.tokenization import EstimatingTokenizer, ZeroEstimatingTokenizer
 from parlant.core.tracer import Tracer
 
@@ -572,3 +573,73 @@ async def test_that_base_streaming_text_generator_propagates_exceptions(
     with raises(Exception, match="Generation failed mid-stream"):
         async for _ in result.stream:
             pass
+
+
+async def test_that_rate_limit_policy_allows_requests_within_limit(
+    container: Container,
+) -> None:
+    rate_limiter = RateLimitPolicy(max_requests=3, per_seconds=10.0)
+
+    call_count = 0
+
+    @policy([rate_limiter])
+    async def limited_func() -> int:
+        nonlocal call_count
+        call_count += 1
+        return call_count
+
+    result1 = await limited_func()
+    result2 = await limited_func()
+    result3 = await limited_func()
+
+    assert result1 == 1
+    assert result2 == 2
+    assert result3 == 3
+    assert call_count == 3
+
+
+async def test_that_rate_limit_policy_blocks_requests_exceeding_limit(
+    container: Container,
+) -> None:
+    rate_limiter = RateLimitPolicy(max_requests=2, per_seconds=0.2)
+
+    call_count = 0
+
+    @policy([rate_limiter])
+    async def limited_func() -> int:
+        nonlocal call_count
+        call_count += 1
+        return call_count
+
+    t0 = time.monotonic()
+    result1 = await limited_func()
+    result2 = await limited_func()
+    result3 = await limited_func()
+    elapsed = time.monotonic() - t0
+
+    assert result1 == 1
+    assert result2 == 2
+    assert result3 == 3
+    assert elapsed >= 0.15
+    assert call_count == 3
+
+
+async def test_that_rate_limit_policy_can_be_stacked_with_retry(
+    container: Container,
+) -> None:
+    rate_limiter = RateLimitPolicy(max_requests=5, per_seconds=10.0)
+
+    call_count = 0
+
+    @policy([rate_limiter, retry(exceptions=(FirstException,), max_exceptions=3)])
+    async def limited_func() -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise FirstException("error")
+        return "success"
+
+    result = await limited_func()
+
+    assert result == "success"
+    assert call_count == 3

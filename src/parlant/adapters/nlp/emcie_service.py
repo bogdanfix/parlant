@@ -31,7 +31,7 @@ from parlant.adapters.nlp.common import normalize_json_output, record_llm_metric
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.loggers import Logger
 from parlant.core.meter import Meter
-from parlant.core.nlp.policies import policy, retry
+from parlant.core.nlp.policies import policy, RateLimitPolicy, retry
 from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.nlp.service import (
     EmbedderHints,
@@ -80,6 +80,10 @@ _WORD_BOUNDARY_PATTERN = re.compile(r"(?<=\s)")
 
 # Number of words to buffer before yielding a chunk
 _WORDS_PER_CHUNK = 3
+
+_rate_limiter = RateLimitPolicy(
+    max_requests=int(os.environ.get("EMCIE_RPM_LIMIT", "0")),
+)
 
 
 class EmcieEstimatingTokenizer(EstimatingTokenizer):
@@ -136,7 +140,8 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
 
     @policy(
         [
-            retry(exceptions=(RateLimitError)),
+            _rate_limiter,
+            retry(exceptions=(RateLimitError), max_exceptions=10, wait_times=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 30.0, 30.0, 30.0)),
             retry(EmcieAPIError, max_exceptions=2, wait_times=(1.0, 5.0)),
         ]
     )
@@ -347,6 +352,13 @@ class EmcieStreamingTextGenerator(BaseStreamingTextGenerator):
     def tokenizer(self) -> EmcieEstimatingTokenizer:
         return self._tokenizer
 
+    @policy(
+        [
+            _rate_limiter,
+            retry(exceptions=(RateLimitError), max_exceptions=10, wait_times=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 30.0, 30.0, 30.0)),
+            retry(EmcieAPIError, max_exceptions=2, wait_times=(1.0, 5.0)),
+        ]
+    )
     @override
     async def do_generate(
         self,
@@ -548,7 +560,8 @@ class EmcieEmbedder(BaseEmbedder):
 
     @policy(
         [
-            retry(exceptions=(RateLimitError)),
+            _rate_limiter,
+            retry(exceptions=(RateLimitError), max_exceptions=10, wait_times=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 30.0, 30.0, 30.0)),
             retry(EmcieAPIError, max_exceptions=2, wait_times=(1.0, 5.0)),
         ]
     )
