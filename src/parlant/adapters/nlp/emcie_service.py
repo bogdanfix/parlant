@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from __future__ import annotations
+import asyncio
 from pprint import pformat
 import re
 import time
@@ -82,7 +83,50 @@ _WORD_BOUNDARY_PATTERN = re.compile(r"(?<=\s)")
 _WORDS_PER_CHUNK = 3
 
 _rate_limiter = RateLimitPolicy(
-    max_requests=int(os.environ.get("EMCIE_RPM_LIMIT", "0")),
+    max_requests=int(os.environ.get("EMCIE_RPM_LIMIT", "500")),
+)
+
+
+class _TokenBudget:
+    def __init__(self, max_tokens_per_minute: int, window_seconds: float = 60.0) -> None:
+        self._max_tokens_per_minute = max_tokens_per_minute
+        self._window_seconds = window_seconds
+        self._usages: list[tuple[float, int]] = []
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        if self._max_tokens_per_minute <= 0:
+            return
+
+        async with self._lock:
+            now = time.monotonic()
+            window_start = now - self._window_seconds
+            self._usages = [(ts, t) for ts, t in self._usages if ts > window_start]
+            total = sum(t for _, t in self._usages)
+
+            while total >= self._max_tokens_per_minute and self._usages:
+                sleep_time = self._usages[0][0] + self._window_seconds - now
+                if sleep_time <= 0:
+                    break
+                await asyncio.sleep(sleep_time)
+                now = time.monotonic()
+                window_start = now - self._window_seconds
+                self._usages = [(ts, t) for ts, t in self._usages if ts > window_start]
+                total = sum(t for _, t in self._usages)
+
+    async def report(self, tokens: int) -> None:
+        if self._max_tokens_per_minute <= 0:
+            return
+
+        async with self._lock:
+            now = time.monotonic()
+            window_start = now - self._window_seconds
+            self._usages = [(ts, t) for ts, t in self._usages if ts > window_start]
+            self._usages.append((now, tokens))
+
+
+_token_budget = _TokenBudget(
+    max_tokens_per_minute=int(os.environ.get("EMCIE_TPM_LIMIT", "0")),
 )
 
 
@@ -192,6 +236,8 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
                 pool=5.0,
             )
 
+            await _token_budget.acquire()
+
             async with AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     f"{BASE_URL}/v1/completions",
@@ -250,6 +296,14 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
         cost = response_data["cost"]
 
         self.logger.trace(f"Emcie usage data:\n{pformat({**usage, **cost})}")
+
+        input_tokens = int(usage["input_tokens"])
+        output_tokens = int(usage["output_tokens"])
+        self.logger.info(
+            f"Emcie token usage: {input_tokens} input + {output_tokens} output = {input_tokens + output_tokens} tokens"
+        )
+
+        await _token_budget.report(int(usage["input_tokens"]) + int(usage["output_tokens"]))
 
         raw_content = response_data["completion"]
 
@@ -405,6 +459,8 @@ class EmcieStreamingTextGenerator(BaseStreamingTextGenerator):
             buffer = ""
 
             async with AsyncClient(timeout=timeout) as client:
+                await _token_budget.acquire()
+
                 async with client.stream(
                     "POST",
                     f"{BASE_URL}/v1/completions",
@@ -480,6 +536,16 @@ class EmcieStreamingTextGenerator(BaseStreamingTextGenerator):
                                 )
 
                                 self.logger.trace(f"Emcie streaming usage data:\n{pformat(data)}")
+
+                                input_tokens = int(usage.get("input_tokens", 0))
+                                output_tokens = int(usage.get("output_tokens", 0))
+                                self.logger.info(
+                                    f"Emcie token usage (stream): {input_tokens} input + {output_tokens} output = {input_tokens + output_tokens} tokens"
+                                )
+
+                                await _token_budget.report(
+                                    int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
+                                )
 
                                 # Yield any remaining content in the buffer
                                 if buffer:
@@ -595,6 +661,8 @@ class EmcieEmbedder(BaseEmbedder):
                 pool=5.0,
             )
 
+            await _token_budget.acquire()
+
             async with AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     f"{BASE_URL}/v1/embeddings",
@@ -638,6 +706,8 @@ class EmcieEmbedder(BaseEmbedder):
             raise
 
         response_data = response.json()
+        await _token_budget.report(sum(len(t) // 4 for t in texts))
+        self.logger.info(f"Emcie token usage (embed): ~{sum(len(t) // 4 for t in texts)} tokens estimated")
         vectors = [data_point["embedding"] for data_point in response_data["data"]]
         return EmbeddingResult(vectors=vectors)
 

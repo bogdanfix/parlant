@@ -41,6 +41,7 @@ from parlant.core.nlp.generation import (
 )
 from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
 from parlant.core.nlp.policies import RateLimitPolicy, policy, retry
+from parlant.adapters.nlp.emcie_service import _TokenBudget
 from parlant.core.nlp.tokenization import EstimatingTokenizer, ZeroEstimatingTokenizer
 from parlant.core.tracer import Tracer
 
@@ -643,3 +644,46 @@ async def test_that_rate_limit_policy_can_be_stacked_with_retry(
 
     assert result == "success"
     assert call_count == 3
+
+
+async def test_that_token_budget_allows_acquire_when_under_limit(
+    container: Container,
+) -> None:
+    budget = _TokenBudget(max_tokens_per_minute=100, window_seconds=0.2)
+
+    await budget.report(50)
+
+    t0 = time.monotonic()
+    await budget.acquire()
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 0.1
+
+
+async def test_that_token_budget_delays_acquire_when_over_limit(
+    container: Container,
+) -> None:
+    budget = _TokenBudget(max_tokens_per_minute=100, window_seconds=0.2)
+
+    await budget.report(100)
+
+    t0 = time.monotonic()
+    await budget.acquire()
+    elapsed = time.monotonic() - t0
+
+    assert elapsed >= 0.15
+
+
+async def test_that_token_budget_allows_acquire_after_window_expires(
+    container: Container,
+) -> None:
+    budget = _TokenBudget(max_tokens_per_minute=100, window_seconds=0.1)
+
+    await budget.report(100)
+    await asyncio.sleep(0.15)
+
+    t0 = time.monotonic()
+    await budget.acquire()
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 0.1
