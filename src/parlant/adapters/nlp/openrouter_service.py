@@ -161,6 +161,12 @@ class OpenRouterSchematicGenerator(BaseSchematicGenerator[T]):
             k: v for k, v in hints.items() if k in self.supported_openrouter_params
         }
 
+        preset = os.environ.get("OPENROUTER_PRESET")
+
+        extra_body: dict[str, str] = {}
+        if preset:
+            extra_body["preset"] = preset
+
         t_start = time.time()
 
         # Try with JSON mode first, but catch errors gracefully
@@ -172,6 +178,7 @@ class OpenRouterSchematicGenerator(BaseSchematicGenerator[T]):
                 messages=[{"role": "user", "content": prompt}],
                 model=self.model_name,
                 response_format={"type": "json_object"},
+                extra_body=extra_body if extra_body else None,
                 **openrouter_api_arguments,
             )
         except BadRequestError as e:
@@ -193,6 +200,7 @@ class OpenRouterSchematicGenerator(BaseSchematicGenerator[T]):
                             {"role": "user", "content": prompt},
                         ],
                         model=self.model_name,
+                        extra_body=extra_body if extra_body else None,
                         **openrouter_api_arguments,
                     )
                 except Exception as retry_error:

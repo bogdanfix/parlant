@@ -257,6 +257,79 @@ async def test_that_openrouter_generator_handles_json_mode_error(mock_client_cla
         await generator.do_generate("Test prompt")
 
 
+async def test_that_openrouter_generator_passes_preset_to_api_call(
+    container: Container,
+) -> None:
+    """Test OpenRouter generator passes preset from OPENROUTER_PRESET env var."""
+    mock_response = Mock(spec=ChatCompletion)
+    mock_response.choices = [
+        Choice(
+            message=ChatCompletionMessage(role="assistant", content='{"test_field": "test_value"}'),
+            finish_reason="stop",
+            index=0,
+        )
+    ]
+    mock_response.usage = CompletionUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+
+    with patch.dict(
+        os.environ,
+        {"OPENROUTER_PRESET": "email-copywriter"},
+        clear=False,
+    ):
+        with patch("parlant.adapters.nlp.openrouter_service.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client_class.return_value = mock_client
+
+            generator = OpenRouterSchematicGenerator[SchemaData](
+                model_name="openai/gpt-4o",
+                logger=container[Logger],
+                tracer=container[Tracer],
+                meter=container[Meter],
+            )
+
+            await generator.do_generate('Generate {"test_field": "test_value"}')
+
+            create_call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+            assert create_call_kwargs.get("extra_body") == {"preset": "email-copywriter"}
+
+
+async def test_that_openrouter_generator_does_not_pass_preset_when_not_set(
+    container: Container,
+) -> None:
+    """Test OpenRouter generator does not pass preset when OPENROUTER_PRESET is not set."""
+    mock_response = Mock(spec=ChatCompletion)
+    mock_response.choices = [
+        Choice(
+            message=ChatCompletionMessage(role="assistant", content='{"test_field": "test_value"}'),
+            finish_reason="stop",
+            index=0,
+        )
+    ]
+    mock_response.usage = CompletionUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+
+    with patch.dict(os.environ, {}, clear=False):
+        if "OPENROUTER_PRESET" in os.environ:
+            del os.environ["OPENROUTER_PRESET"]
+
+        with patch("parlant.adapters.nlp.openrouter_service.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client_class.return_value = mock_client
+
+            generator = OpenRouterSchematicGenerator[SchemaData](
+                model_name="openai/gpt-4o",
+                logger=container[Logger],
+                tracer=container[Tracer],
+                meter=container[Meter],
+            )
+
+            await generator.do_generate('Generate {"test_field": "test_value"}')
+
+            create_call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+            assert create_call_kwargs.get("extra_body") is None
+
+
 async def test_that_openrouter_generator_handles_successful_response(
     container: Container,
 ) -> None:
