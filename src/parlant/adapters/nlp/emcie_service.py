@@ -32,7 +32,7 @@ from parlant.adapters.nlp.common import normalize_json_output, record_llm_metric
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder
 from parlant.core.loggers import Logger
 from parlant.core.meter import Meter
-from parlant.core.nlp.policies import policy, RateLimitPolicy, retry
+from parlant.core.nlp.policies import RateLimitPolicy
 from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.nlp.service import (
     EmbedderHints,
@@ -82,9 +82,6 @@ _WORD_BOUNDARY_PATTERN = re.compile(r"(?<=\s)")
 # Number of words to buffer before yielding a chunk
 _WORDS_PER_CHUNK = 3
 
-_rate_limiter = RateLimitPolicy(
-    max_requests=int(os.environ.get("EMCIE_RPM_LIMIT", "500")),
-)
 
 
 class _TokenBudget:
@@ -125,9 +122,85 @@ class _TokenBudget:
             self._usages.append((now, tokens))
 
 
-_token_budget = _TokenBudget(
-    max_tokens_per_minute=int(os.environ.get("EMCIE_TPM_LIMIT", "0")),
-)
+class _KeySlot:
+    def __init__(self, index: int, value: str, rpm_limit: int, tpm_limit: int) -> None:
+        self.index = index
+        self.value = value
+        self.limiter = RateLimitPolicy(max_requests=rpm_limit)
+        self.budget = _TokenBudget(max_tokens_per_minute=tpm_limit)
+        self.exhausted_until: float = 0.0
+        self.dead: bool = False
+
+    def is_available(self) -> bool:
+        return not self.dead and time.monotonic() >= self.exhausted_until
+
+    def mask(self) -> str:
+        if len(self.value) <= 8:
+            return f"ключ #{self.index} (***)"
+        return f"ключ #{self.index} ({self.value[:4]}...{self.value[-4:]})"
+
+
+class _KeyPool:
+    _LOCK_COOLDOWN_SECONDS = 60.0
+
+    def __init__(self, keys: list[str], rpm_limit: int, tpm_limit: int) -> None:
+        self._slots = [
+            _KeySlot(index=i + 1, value=k, rpm_limit=rpm_limit, tpm_limit=tpm_limit)
+            for i, k in enumerate(keys)
+        ]
+        self._next_index = -1
+        self._lock = asyncio.Lock()
+
+    @classmethod
+    def from_env(cls) -> "_KeyPool":
+        raw = os.environ.get("EMCIE_API_KEY", "")
+        rpm = int(os.environ.get("EMCIE_RPM_LIMIT", "500"))
+        tpm = int(os.environ.get("EMCIE_TPM_LIMIT", "0"))
+        keys = [k.strip() for k in raw.split(",") if k.strip()]
+        if not keys:
+            keys = [""]
+        return cls(keys=keys, rpm_limit=rpm, tpm_limit=tpm)
+
+    @property
+    def total_key_count(self) -> int:
+        return len(self._slots)
+
+    async def acquire(self) -> _KeySlot:
+        while True:
+            async with self._lock:
+                for _ in range(len(self._slots)):
+                    self._next_index = (self._next_index + 1) % len(self._slots)
+                    slot = self._slots[self._next_index]
+                    if slot.is_available():
+                        return slot
+
+                recoverable = [s for s in self._slots if not s.dead]
+                if not recoverable:
+                    raise EmcieAPIError(
+                        "Все ключи Emcie недействительны. "
+                        "Проверьте баланс и статус каждого аккаунта."
+                    )
+
+                earliest = min(recoverable, key=lambda s: s.exhausted_until)
+                wait = earliest.exhausted_until - time.monotonic()
+
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+    def mark_exhausted(self, slot: _KeySlot) -> None:
+        slot.exhausted_until = time.monotonic() + self._LOCK_COOLDOWN_SECONDS
+
+    def mark_dead(self, slot: _KeySlot) -> None:
+        slot.dead = True
+
+    def has_dead_keys(self) -> bool:
+        return any(s.dead for s in self._slots)
+
+    def has_exhausted_keys(self) -> bool:
+        return any(s.exhausted_until > time.monotonic() for s in self._slots if not s.dead)
+
+
+_key_pool = _KeyPool.from_env()
 
 
 class EmcieEstimatingTokenizer(EstimatingTokenizer):
@@ -199,13 +272,6 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
     def tokenizer(self) -> EmcieEstimatingTokenizer:
         return self._tokenizer
 
-    @policy(
-        [
-            _rate_limiter,
-            retry(exceptions=(RateLimitError), max_exceptions=10, wait_times=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 30.0, 30.0, 30.0)),
-            retry(EmcieAPIError, max_exceptions=2, wait_times=(1.0, 5.0)),
-        ]
-    )
     @override
     async def do_generate(
         self,
@@ -226,69 +292,88 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
         else:
             props = {}
 
-        try:
-            t_start = time.time()
+        max_attempts = _key_pool.total_key_count * 3
 
-            timeout = httpx.Timeout(
-                connect=30.0,
-                read=120.0,
-                write=30.0,
-                pool=5.0,
-            )
+        for _attempt in range(max_attempts):
+            slot = await _key_pool.acquire()
 
-            await _token_budget.acquire()
+            await slot.limiter.wait_and_record()
+            await slot.budget.acquire()
 
-            async with AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    f"{BASE_URL}/v1/completions",
-                    headers={
-                        "Authorization": f"Bearer {os.environ['EMCIE_API_KEY']}",
-                        "X-Parlant-Version": VERSION,
-                    },
-                    json={
-                        "model_tier": self.model_name,
-                        "model_role": self._model_role,
-                        "prompt": prompt,
-                        "schema_name": self.schema.__name__,
-                        "hints": {
-                            k: v for k, v in hints.items() if k in self.supported_emcie_params
-                        },
-                        "payload": props,
-                    },
+            self.logger.info(f"Запрос через {slot.mask()}")
+
+            try:
+                t_start = time.time()
+
+                timeout = httpx.Timeout(
+                    connect=30.0,
+                    read=120.0,
+                    write=30.0,
+                    pool=5.0,
                 )
 
-                if response.is_error:
-                    error_message, request_id = _get_error_detail(response)
+                async with AsyncClient(timeout=timeout) as client:
+                    response = await client.post(
+                        f"{BASE_URL}/v1/completions",
+                        headers={
+                            "Authorization": f"Bearer {slot.value}",
+                            "X-Parlant-Version": VERSION,
+                        },
+                        json={
+                            "model_tier": self.model_name,
+                            "model_role": self._model_role,
+                            "prompt": prompt,
+                            "schema_name": self.schema.__name__,
+                            "hints": {
+                                k: v for k, v in hints.items() if k in self.supported_emcie_params
+                            },
+                            "payload": props,
+                        },
+                    )
 
-                if response.status_code == 429:
-                    raise RateLimitError(
-                        f"Emcie API rate limit exceeded: {error_message} (RID={request_id})"
-                    )
-                elif response.status_code == 402:
-                    raise InsufficientCreditsError(
-                        f"Insufficient API credits for Emcie API: {error_message} (RID={request_id})"
-                    )
-                elif response.status_code == 403:
-                    raise UnauthorizedError(
-                        f"Unauthorized access to Emcie API: {error_message} (RID={request_id})"
-                    )
-                elif response.status_code >= 500:
-                    raise EmcieAPIError(
-                        f"Emcie API error: {response.status_code} {error_message} (RID={request_id})"
-                    )
+                    if response.status_code == 429:
+                        _key_pool.mark_exhausted(slot)
+                        self.logger.warning(f"{slot.mask()} исчерпан (429), переключаем...")
+                        continue
+                    elif response.status_code == 402:
+                        _key_pool.mark_dead(slot)
+                        self.logger.error(
+                            f"{slot.mask()} заблокирован (402 — недостаточно кредитов), переключаем..."
+                        )
+                        continue
+                    elif response.status_code == 403:
+                        _key_pool.mark_dead(slot)
+                        self.logger.error(
+                            f"{slot.mask()} заблокирован (403 — неавторизован), переключаем..."
+                        )
+                        continue
+                    elif response.is_error:
+                        error_message, request_id = _get_error_detail(response)
+                        if response.status_code >= 500:
+                            self.logger.warning(
+                                f"Ошибка сервера Emcie (status={response.status_code}) "
+                                f"на {slot.mask()}, переключаем..."
+                            )
+                            await asyncio.sleep(1.0)
+                            continue
+                        raise EmcieAPIError(
+                            f"Emcie API error: {response.status_code} {error_message} (RID={request_id})"
+                        )
 
-                response.raise_for_status()
+                    response.raise_for_status()
 
-            t_end = time.time()
-        except (InsufficientCreditsError, RateLimitError):
+                t_end = time.time()
+                break
+
+            except EmcieAPIError:
+                raise
+
+        else:
             self.logger.error(RATE_LIMIT_ERROR_MESSAGE)
-            raise
-        except EmcieAPIError as e:
-            self.logger.error(f"Emcie API error occurred: {e}")
-            raise
-        except Exception as e:
-            self.logger.error(f"Unexpected error during Emcie API call: {e}")
-            raise
+            raise RateLimitError(
+                "Все ключи Emcie исчерпаны. Дождитесь восстановления лимитов или "
+                "проверьте баланс аккаунтов."
+            )
 
         response_data = response.json()
 
@@ -299,11 +384,12 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
 
         input_tokens = int(usage["input_tokens"])
         output_tokens = int(usage["output_tokens"])
+        total_tokens = input_tokens + output_tokens
         self.logger.info(
-            f"Emcie token usage: {input_tokens} input + {output_tokens} output = {input_tokens + output_tokens} tokens"
+            f"Emcie ({slot.mask()}): {input_tokens} input + {output_tokens} output = {total_tokens} tokens"
         )
 
-        await _token_budget.report(int(usage["input_tokens"]) + int(usage["output_tokens"]))
+        await slot.budget.report(total_tokens)
 
         raw_content = response_data["completion"]
 
@@ -321,8 +407,8 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
                 self.meter,
                 self.model_name,
                 schema_name=self.schema.__name__,
-                input_tokens=int(usage["input_tokens"]),
-                output_tokens=int(usage["output_tokens"]),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
                 cached_input_tokens=0,
             )
 
@@ -333,8 +419,8 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
                     model=self.id,
                     duration=(t_end - t_start),
                     usage=UsageInfo(
-                        input_tokens=int(usage["input_tokens"]),
-                        output_tokens=int(usage["output_tokens"]),
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
                         extra={},
                     ),
                 ),
@@ -426,13 +512,6 @@ class EmcieStreamingTextGenerator(BaseStreamingTextGenerator):
     def tokenizer(self) -> EmcieEstimatingTokenizer:
         return self._tokenizer
 
-    @policy(
-        [
-            _rate_limiter,
-            retry(exceptions=(RateLimitError), max_exceptions=10, wait_times=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 30.0, 30.0, 30.0)),
-            retry(EmcieAPIError, max_exceptions=2, wait_times=(1.0, 5.0)),
-        ]
-    )
     @override
     async def do_generate(
         self,
@@ -442,121 +521,151 @@ class EmcieStreamingTextGenerator(BaseStreamingTextGenerator):
         if isinstance(prompt, PromptBuilder):
             prompt = prompt.build()
 
-        # Track usage from the done event
         usage_info: UsageInfo | None = None
 
         async def chunk_generator() -> AsyncIterator[str | None]:
             nonlocal usage_info
 
-            timeout = httpx.Timeout(
-                connect=30.0,
-                read=120.0,
-                write=30.0,
-                pool=5.0,
-            )
+            max_attempts = _key_pool.total_key_count * 3
 
-            # Buffer for accumulating tokens into word-sized chunks
-            buffer = ""
+            for _attempt in range(max_attempts):
+                slot = await _key_pool.acquire()
 
-            async with AsyncClient(timeout=timeout) as client:
-                await _token_budget.acquire()
+                await slot.limiter.wait_and_record()
+                await slot.budget.acquire()
 
-                async with client.stream(
-                    "POST",
-                    f"{BASE_URL}/v1/completions",
-                    headers={
-                        "Authorization": f"Bearer {os.environ['EMCIE_API_KEY']}",
-                        "X-Parlant-Version": VERSION,
-                    },
-                    json={
-                        "model_tier": self.model_name,
-                        "model_role": self._model_role,
-                        "prompt": prompt,
-                        "stream": True,
-                        "hints": {
-                            k: v for k, v in hints.items() if k in self.supported_emcie_params
-                        },
-                    },
-                ) as response:
-                    # Check status before iterating to catch auth/rate-limit errors early
-                    if response.is_error:
-                        await response.aread()
-                        error_message, request_id = _get_error_detail(response)
+                self.logger.info(f"Запрос (stream) через {slot.mask()}")
 
-                    if response.status_code == 429:
-                        self.logger.error(RATE_LIMIT_ERROR_MESSAGE)
-                        raise RateLimitError(
-                            f"Emcie API rate limit exceeded: {error_message} (RID={request_id})"
-                        )
-                    elif response.status_code == 402:
-                        self.logger.error(RATE_LIMIT_ERROR_MESSAGE)
-                        raise InsufficientCreditsError(
-                            f"Insufficient API credits for Emcie API: {error_message} (RID={request_id})"
-                        )
-                    elif response.status_code == 403:
-                        raise UnauthorizedError(
-                            f"Unauthorized access to Emcie API: {error_message} (RID={request_id})"
-                        )
-                    elif response.status_code >= 500:
-                        raise EmcieAPIError(
-                            f"Emcie API error: {response.status_code} {error_message} (RID={request_id})"
-                        )
+                timeout = httpx.Timeout(
+                    connect=30.0,
+                    read=120.0,
+                    write=30.0,
+                    pool=5.0,
+                )
 
-                    response.raise_for_status()
+                buffer = ""
 
-                    # Parse SSE events
-                    event_type: str | None = None
+                try:
+                    async with AsyncClient(timeout=timeout) as client:
+                        async with client.stream(
+                            "POST",
+                            f"{BASE_URL}/v1/completions",
+                            headers={
+                                "Authorization": f"Bearer {slot.value}",
+                                "X-Parlant-Version": VERSION,
+                            },
+                            json={
+                                "model_tier": self.model_name,
+                                "model_role": self._model_role,
+                                "prompt": prompt,
+                                "stream": True,
+                                "hints": {
+                                    k: v
+                                    for k, v in hints.items()
+                                    if k in self.supported_emcie_params
+                                },
+                            },
+                        ) as response:
+                            if response.is_error:
+                                await response.aread()
+                                error_message, request_id = _get_error_detail(response)
 
-                    async for line in response.aiter_lines():
-                        if line.startswith("event: "):
-                            event_type = line[7:]
-                        elif line.startswith("data: ") and event_type:
-                            data = json.loads(line[6:])
-
-                            if event_type == "chunk":
-                                text = data.get("text", "")
-                                if text:
-                                    buffer += text
-
-                                    # Count word boundaries in buffer
-                                    boundaries = list(_WORD_BOUNDARY_PATTERN.finditer(buffer))
-                                    if len(boundaries) >= _WORDS_PER_CHUNK:
-                                        # Yield up to the last complete word boundary
-                                        last_boundary = boundaries[_WORDS_PER_CHUNK - 1]
-                                        chunk_text = buffer[: last_boundary.end()]
-                                        buffer = buffer[last_boundary.end() :]
-                                        yield chunk_text
-
-                            elif event_type == "done":
-                                usage = data.get("usage", {})
-                                usage_info = UsageInfo(
-                                    input_tokens=int(usage.get("input_tokens", 0)),
-                                    output_tokens=int(usage.get("output_tokens", 0)),
-                                    extra={},
+                            if response.status_code == 429:
+                                _key_pool.mark_exhausted(slot)
+                                self.logger.warning(
+                                    f"{slot.mask()} исчерпан (429), переключаем..."
                                 )
-
-                                self.logger.trace(f"Emcie streaming usage data:\n{pformat(data)}")
-
-                                input_tokens = int(usage.get("input_tokens", 0))
-                                output_tokens = int(usage.get("output_tokens", 0))
-                                self.logger.info(
-                                    f"Emcie token usage (stream): {input_tokens} input + {output_tokens} output = {input_tokens + output_tokens} tokens"
+                                continue
+                            elif response.status_code == 402:
+                                _key_pool.mark_dead(slot)
+                                self.logger.error(
+                                    f"{slot.mask()} заблокирован (402 — недостаточно кредитов), переключаем..."
                                 )
-
-                                await _token_budget.report(
-                                    int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
+                                continue
+                            elif response.status_code == 403:
+                                _key_pool.mark_dead(slot)
+                                self.logger.error(
+                                    f"{slot.mask()} заблокирован (403 — неавторизован), переключаем..."
                                 )
+                                continue
+                            elif response.status_code >= 500:
+                                self.logger.warning(
+                                    f"Ошибка сервера Emcie (status={response.status_code}) "
+                                    f"на {slot.mask()}, переключаем..."
+                                )
+                                await asyncio.sleep(1.0)
+                                continue
 
-                                # Yield any remaining content in the buffer
-                                if buffer:
-                                    yield buffer
-                                    buffer = ""
+                            response.raise_for_status()
 
-                            elif event_type == "error":
-                                error_msg = data.get("error", {}).get("message", "Unknown error")
-                                raise EmcieAPIError(f"Emcie streaming error: {error_msg}")
+                            event_type: str | None = None
 
-            # Record metrics if we have usage info
+                            async for line in response.aiter_lines():
+                                if line.startswith("event: "):
+                                    event_type = line[7:]
+                                elif line.startswith("data: ") and event_type:
+                                    data = json.loads(line[6:])
+
+                                    if event_type == "chunk":
+                                        text = data.get("text", "")
+                                        if text:
+                                            buffer += text
+
+                                            boundaries = list(
+                                                _WORD_BOUNDARY_PATTERN.finditer(buffer)
+                                            )
+                                            if len(boundaries) >= _WORDS_PER_CHUNK:
+                                                last_boundary = boundaries[_WORDS_PER_CHUNK - 1]
+                                                chunk_text = buffer[: last_boundary.end()]
+                                                buffer = buffer[last_boundary.end() :]
+                                                yield chunk_text
+
+                                    elif event_type == "done":
+                                        usage = data.get("usage", {})
+                                        usage_info = UsageInfo(
+                                            input_tokens=int(usage.get("input_tokens", 0)),
+                                            output_tokens=int(usage.get("output_tokens", 0)),
+                                            extra={},
+                                        )
+
+                                        self.logger.trace(
+                                            f"Emcie streaming usage data:\n{pformat(data)}"
+                                        )
+
+                                        input_tokens = int(usage.get("input_tokens", 0))
+                                        output_tokens = int(usage.get("output_tokens", 0))
+                                        self.logger.info(
+                                            f"Emcie ({slot.mask()}): {input_tokens} input + {output_tokens} output = {input_tokens + output_tokens} tokens"
+                                        )
+
+                                        await slot.budget.report(input_tokens + output_tokens)
+
+                                        if buffer:
+                                            yield buffer
+                                            buffer = ""
+
+                                    elif event_type == "error":
+                                        error_msg = data.get("error", {}).get(
+                                            "message", "Unknown error"
+                                        )
+                                        raise EmcieAPIError(
+                                            f"Emcie streaming error: {error_msg}"
+                                        )
+
+                except (httpx.TimeoutException, httpx.TransportError) as e:
+                    self.logger.warning(
+                        f"Сетевая ошибка на {slot.mask()}: {e}, переключаем..."
+                    )
+                    continue
+
+                break
+
+            else:
+                self.logger.error(RATE_LIMIT_ERROR_MESSAGE)
+                raise RateLimitError(
+                    "Все ключи Emcie исчерпаны при стриминговом запросе."
+                )
+
             if usage_info is not None:
                 await record_llm_metrics(
                     self.meter,
@@ -567,7 +676,6 @@ class EmcieStreamingTextGenerator(BaseStreamingTextGenerator):
                     cached_input_tokens=0,
                 )
 
-            # Signal completion
             yield None
 
         def get_usage() -> UsageInfo:
@@ -640,76 +748,95 @@ class EmcieEmbedder(BaseEmbedder):
     def tokenizer(self) -> EmcieEstimatingTokenizer:
         return self._tokenizer
 
-    @policy(
-        [
-            _rate_limiter,
-            retry(exceptions=(RateLimitError), max_exceptions=10, wait_times=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 30.0, 30.0, 30.0)),
-            retry(EmcieAPIError, max_exceptions=2, wait_times=(1.0, 5.0)),
-        ]
-    )
     @override
     async def do_embed(
         self,
         texts: list[str],
         hints: Mapping[str, Any] = {},
     ) -> EmbeddingResult:
-        try:
-            timeout = httpx.Timeout(
-                connect=5.0,
-                read=120.0,
-                write=30.0,
-                pool=5.0,
-            )
+        max_attempts = _key_pool.total_key_count * 3
 
-            await _token_budget.acquire()
+        for _attempt in range(max_attempts):
+            slot = await _key_pool.acquire()
 
-            async with AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    f"{BASE_URL}/v1/embeddings",
-                    headers={
-                        "Authorization": f"Bearer {os.environ['EMCIE_API_KEY']}",
-                        "X-Parlant-Version": VERSION,
-                    },
-                    json={
-                        "model_tier": self.model_name,
-                        "inputs": texts,
-                        "hints": {k: v for k, v in hints.items() if k in self.supported_arguments},
-                    },
+            await slot.limiter.wait_and_record()
+            await slot.budget.acquire()
+
+            self.logger.info(f"Запрос (embed) через {slot.mask()}")
+
+            try:
+                timeout = httpx.Timeout(
+                    connect=5.0,
+                    read=120.0,
+                    write=30.0,
+                    pool=5.0,
                 )
 
-                if response.is_error:
-                    error_message, request_id = _get_error_detail(response)
-
-                if response.status_code == 429:
-                    raise RateLimitError(
-                        f"Emcie API rate limit exceeded: {error_message} (RID={request_id})"
-                    )
-                elif response.status_code == 402:
-                    raise InsufficientCreditsError(
-                        f"Insufficient API credits for Emcie API: {error_message} (RID={request_id})"
-                    )
-                elif response.status_code == 403:
-                    raise UnauthorizedError(
-                        f"Unauthorized access to Emcie API: {error_message} (RID={request_id})"
-                    )
-                elif response.status_code >= 500:
-                    raise EmcieAPIError(
-                        f"Emcie API error: {response.status_code} {error_message} (RID={request_id})"
+                async with AsyncClient(timeout=timeout) as client:
+                    response = await client.post(
+                        f"{BASE_URL}/v1/embeddings",
+                        headers={
+                            "Authorization": f"Bearer {slot.value}",
+                            "X-Parlant-Version": VERSION,
+                        },
+                        json={
+                            "model_tier": self.model_name,
+                            "inputs": texts,
+                            "hints": {
+                                k: v for k, v in hints.items() if k in self.supported_arguments
+                            },
+                        },
                     )
 
-                response.raise_for_status()
-        except (RateLimitError, InsufficientCreditsError):
-            self.logger.error(RATE_LIMIT_ERROR_MESSAGE)
-            raise
-        except Exception as e:
-            self.logger.error(f"Unexpected error during Emcie API call: {e}")
-            raise
+                    if response.is_error:
+                        error_message, request_id = _get_error_detail(response)
 
-        response_data = response.json()
-        await _token_budget.report(sum(len(t) // 4 for t in texts))
-        self.logger.info(f"Emcie token usage (embed): ~{sum(len(t) // 4 for t in texts)} tokens estimated")
-        vectors = [data_point["embedding"] for data_point in response_data["data"]]
-        return EmbeddingResult(vectors=vectors)
+                    if response.status_code == 429:
+                        _key_pool.mark_exhausted(slot)
+                        self.logger.warning(
+                            f"{slot.mask()} исчерпан (429), переключаем..."
+                        )
+                        continue
+                    elif response.status_code == 402:
+                        _key_pool.mark_dead(slot)
+                        self.logger.error(
+                            f"{slot.mask()} заблокирован (402 — недостаточно кредитов), переключаем..."
+                        )
+                        continue
+                    elif response.status_code == 403:
+                        _key_pool.mark_dead(slot)
+                        self.logger.error(
+                            f"{slot.mask()} заблокирован (403 — неавторизован), переключаем..."
+                        )
+                        continue
+                    elif response.status_code >= 500:
+                        self.logger.warning(
+                            f"Ошибка сервера Emcie (status={response.status_code}) "
+                            f"на {slot.mask()}, переключаем..."
+                        )
+                        await asyncio.sleep(1.0)
+                        continue
+
+                    response.raise_for_status()
+
+            except EmcieAPIError as e:
+                self.logger.error(f"Emcie API error occurred: {e}")
+                raise
+            except Exception as e:
+                self.logger.error(f"Unexpected error during Emcie API call: {e}")
+                raise
+
+            response_data = response.json()
+            estimated_tokens = sum(len(t) // 4 for t in texts)
+            await slot.budget.report(estimated_tokens)
+            self.logger.info(
+                f"Emcie ({slot.mask()}): ~{estimated_tokens} tokens estimated (embed)"
+            )
+            vectors = [data_point["embedding"] for data_point in response_data["data"]]
+            return EmbeddingResult(vectors=vectors)
+
+        self.logger.error(RATE_LIMIT_ERROR_MESSAGE)
+        raise RateLimitError("Все ключи Emcie исчерпаны при запросе эмбеддингов.")
 
 
 class BisonEmbedding(EmcieEmbedder):

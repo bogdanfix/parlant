@@ -95,8 +95,15 @@ class RateLimitPolicy(Policy):
         *args: Any,
         **kwargs: Any,
     ) -> R:
+        await self.wait_and_record()
+        return await func(state, *args, **kwargs)
+
+    async def wait_and_record(self) -> float:
+        """Ожидает свободный слот в RPM-окне и записывает timestamp запроса.
+        Возвращает время ожидания в секундах.
+        """
         if self.max_requests <= 0:
-            return await func(state, *args, **kwargs)
+            return 0.0
 
         async with self._lock:
             now = time.monotonic()
@@ -110,7 +117,7 @@ class RateLimitPolicy(Policy):
         if sleep_time > 0:
             await asyncio.sleep(sleep_time)
 
-        return await func(state, *args, **kwargs)
+        return sleep_time
 
 
 def retry(
