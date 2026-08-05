@@ -335,6 +335,12 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
                         _key_pool.mark_exhausted(slot)
                         self.logger.warning(f"{slot.mask()} исчерпан (429), переключаем...")
                         continue
+                    elif response.status_code == 401:
+                        _key_pool.mark_dead(slot)
+                        self.logger.error(
+                            f"{slot.mask()} заблокирован (401 — неавторизован), переключаем..."
+                        )
+                        continue
                     elif response.status_code == 402:
                         _key_pool.mark_dead(slot)
                         self.logger.error(
@@ -576,6 +582,12 @@ class EmcieStreamingTextGenerator(BaseStreamingTextGenerator):
                                     f"{slot.mask()} исчерпан (429), переключаем..."
                                 )
                                 continue
+                            elif response.status_code == 401:
+                                _key_pool.mark_dead(slot)
+                                self.logger.error(
+                                    f"{slot.mask()} заблокирован (401 — неавторизован), переключаем..."
+                                )
+                                continue
                             elif response.status_code == 402:
                                 _key_pool.mark_dead(slot)
                                 self.logger.error(
@@ -795,6 +807,12 @@ class EmcieEmbedder(BaseEmbedder):
                         _key_pool.mark_exhausted(slot)
                         self.logger.warning(
                             f"{slot.mask()} исчерпан (429), переключаем..."
+                        )
+                        continue
+                    elif response.status_code == 401:
+                        _key_pool.mark_dead(slot)
+                        self.logger.error(
+                            f"{slot.mask()} заблокирован (401 — неавторизован), переключаем..."
                         )
                         continue
                     elif response.status_code == 402:
