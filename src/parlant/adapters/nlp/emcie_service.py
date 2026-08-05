@@ -74,6 +74,9 @@ EmbeddingModelTier: TypeAlias = Literal["jackal-embedding", "bison-embedding"]
 ModelRole: TypeAlias = Literal["teacher", "student", "auto"]
 
 BASE_URL = os.environ.get("EMCIE_API_URL", "https://api.emcie.co/inference")
+_PROXY_URL = os.environ.get("EMCIE_PROXY_URL") or None
+if _PROXY_URL and _PROXY_URL.endswith(":@"):
+    _PROXY_URL = _PROXY_URL.removesuffix(":@")
 
 # Pattern to detect word boundaries for chunking
 # Matches after any whitespace character
@@ -300,7 +303,9 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
             await slot.limiter.wait_and_record()
             await slot.budget.acquire()
 
-            self.logger.info(f"Запрос через {slot.mask()}")
+            self.logger.info(
+                f"Запрос через {slot.mask()}{', прокси' if _PROXY_URL else ''}"
+            )
 
             try:
                 t_start = time.time()
@@ -312,7 +317,7 @@ class EmcieSchematicGenerator(BaseSchematicGenerator[T]):
                     pool=5.0,
                 )
 
-                async with AsyncClient(timeout=timeout) as client:
+                async with AsyncClient(timeout=timeout, proxy=_PROXY_URL, verify=not bool(_PROXY_URL)) as client:
                     response = await client.post(
                         f"{BASE_URL}/v1/completions",
                         headers={
@@ -540,7 +545,9 @@ class EmcieStreamingTextGenerator(BaseStreamingTextGenerator):
                 await slot.limiter.wait_and_record()
                 await slot.budget.acquire()
 
-                self.logger.info(f"Запрос (stream) через {slot.mask()}")
+                self.logger.info(
+                    f"Запрос (stream) через {slot.mask()}{', прокси' if _PROXY_URL else ''}"
+                )
 
                 timeout = httpx.Timeout(
                     connect=30.0,
@@ -552,7 +559,7 @@ class EmcieStreamingTextGenerator(BaseStreamingTextGenerator):
                 buffer = ""
 
                 try:
-                    async with AsyncClient(timeout=timeout) as client:
+                    async with AsyncClient(timeout=timeout, proxy=_PROXY_URL, verify=not bool(_PROXY_URL)) as client:
                         async with client.stream(
                             "POST",
                             f"{BASE_URL}/v1/completions",
@@ -774,7 +781,9 @@ class EmcieEmbedder(BaseEmbedder):
             await slot.limiter.wait_and_record()
             await slot.budget.acquire()
 
-            self.logger.info(f"Запрос (embed) через {slot.mask()}")
+            self.logger.info(
+                f"Запрос (embed) через {slot.mask()}{', прокси' if _PROXY_URL else ''}"
+            )
 
             try:
                 timeout = httpx.Timeout(
@@ -784,7 +793,7 @@ class EmcieEmbedder(BaseEmbedder):
                     pool=5.0,
                 )
 
-                async with AsyncClient(timeout=timeout) as client:
+                async with AsyncClient(timeout=timeout, proxy=_PROXY_URL, verify=not bool(_PROXY_URL)) as client:
                     response = await client.post(
                         f"{BASE_URL}/v1/embeddings",
                         headers={
