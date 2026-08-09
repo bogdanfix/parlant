@@ -592,6 +592,7 @@ class AlphaEngine(Engine):
             matching_finished = True
 
             context.state.journeys = guideline_and_journey_matching_result.journeys
+            context.state.generation_infos += guideline_and_journey_matching_result.matching_result.batch_generations
         except asyncio.CancelledError:
             extended_thinking_status_task.cancel()
             raise
@@ -644,6 +645,7 @@ class AlphaEngine(Engine):
 
             if inference_result is not None:
                 tool_insights = inference_result.insights
+                context.state.generation_infos += inference_result.batch_generations
 
                 # Allow the plan to intervene on the inferred tool calls, e.g. to filter or reorder them.
                 tool_calls = await plan.on_tools_inferred(context, inference_result)
@@ -706,6 +708,8 @@ class AlphaEngine(Engine):
         # - Dorzo
         context.state.journeys += guideline_and_journey_matching_result.journeys
 
+        context.state.generation_infos += guideline_and_journey_matching_result.matching_result.batch_generations
+
         # Matched guidelines may use glossary terms, so we need to ground our
         # response by reevaluating the relevant terms given these new guidelines.
         context.state.glossary_terms.update(await self._load_glossary_terms(context))
@@ -744,6 +748,7 @@ class AlphaEngine(Engine):
 
             if inference_result is not None:
                 tool_insights = inference_result.insights
+                context.state.generation_infos += inference_result.batch_generations
 
                 # Allow the plan to intervene on the inferred tool calls, e.g. to filter or reorder them.
                 tool_calls = await plan.on_tools_inferred(context, inference_result)
@@ -870,6 +875,7 @@ class AlphaEngine(Engine):
         ).generate_preamble(context=context):
             generated_messages = True
             context.state.message_events += [e for e in event_generation_result.events if e]
+            context.state.generation_infos += event_generation_result.generation_info.values()
 
         return generated_messages
 
@@ -887,6 +893,7 @@ class AlphaEngine(Engine):
             latch=latch,
         ):
             context.state.message_events += [e for e in event_generation_result.events if e]
+            context.state.generation_infos += event_generation_result.generation_info.values()
 
             message_generation.append(
                 _MessageGeneration(

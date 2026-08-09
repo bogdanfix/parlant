@@ -33,6 +33,7 @@ from parlant.core.glossary import Term
 from parlant.core.guidelines import Guideline
 from parlant.core.journeys import Journey, JourneyId
 from parlant.core.loggers import Logger
+from parlant.core.nlp.generation_info import GenerationInfo
 from parlant.core.sessions import (
     Event,
     EventKind,
@@ -159,6 +160,7 @@ class ResponseState:
     message_events: list[EmittedEvent]
     usable_guidelines: list[Guideline] = field(default_factory=list)
     additional_canned_response_fields: dict[str, Any] = field(default_factory=dict)
+    generation_infos: list[GenerationInfo] = field(default_factory=list)
 
     @property
     def ordinary_guidelines(self) -> list[Guideline]:

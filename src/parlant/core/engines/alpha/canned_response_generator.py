@@ -1081,10 +1081,11 @@ You will now be given the current state of the interaction to which you must gen
 
                 while sub_messages:
                     m = sub_messages.pop(0)
+                    msg_usage = usage if not emitted_events else None
 
                     if await self._hooks.call_on_message_generated(
                         loaded_context,
-                        payload=MessageGenerationPayload(message=m, usage=usage),
+                        payload=MessageGenerationPayload(message=m, usage=msg_usage),
                     ):
                         # If we're in, the hook did not bail out.
 
