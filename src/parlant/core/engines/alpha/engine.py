@@ -2094,6 +2094,8 @@ class AlphaEngine(Engine):
                 guideline_matches=matches_to_analyze,
             )
 
+        context.state.generation_infos += result.batch_generations
+
         new_applied_guideline_ids = [
             a.guideline.id for a in result.analyzed_guidelines if a.is_previously_applied
         ]
