@@ -21,6 +21,7 @@ from parlant.core.engines.alpha.engine_context import EngineContext
 from parlant.core.engines.alpha.engine_context import LoadedContext  # type: ignore
 from parlant.core.guidelines import GuidelineId
 from parlant.core.journeys import JourneyId
+from parlant.core.nlp.generation_info import UsageInfo
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 
 
@@ -48,6 +49,18 @@ EngineHook: TypeAlias = Union[
     Callable[[LoadedContext, Any, Optional[Exception]], Awaitable[EngineHookResult]],  # type: ignore
 ]
 """A callable that takes a EngineContext and an optional Exception, and returns an EngineHookResult."""
+
+
+@dataclass(frozen=True)
+class MessageGenerationPayload:
+    """Payload passed to on_message_generated hook.
+
+    Contains the generated message text and optional token usage info
+    from the NLP service that produced the message.
+    """
+
+    message: str
+    usage: Optional[UsageInfo] = None
 
 
 @dataclass(frozen=False)
@@ -144,7 +157,9 @@ class EngineHooks:
     async def call_on_draft_generated(self, context: EngineContext, payload: str) -> bool:
         return await self.call_hooks(self.on_draft_generated, context, payload)
 
-    async def call_on_message_generated(self, context: EngineContext, payload: str) -> bool:
+    async def call_on_message_generated(
+        self, context: EngineContext, payload: MessageGenerationPayload
+    ) -> bool:
         return await self.call_hooks(self.on_message_generated, context, payload)
 
     async def call_on_messages_emitted(self, context: EngineContext) -> bool:

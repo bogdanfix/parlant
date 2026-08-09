@@ -234,6 +234,41 @@ class Test_that_the_output_of_an_agent_can_be_intercepted(SDKTest):
         assert answer == "Bananas! More bananas!"
 
 
+class Test_that_on_message_generated_receives_token_usage(SDKTest):
+    """Проверяет, что хук on_message_generated получает информацию о затраченных токенах."""
+
+    captured_usage: p.UsageInfo | None = None
+    captured_message: str | None = None
+
+    async def configure_hooks(self, hooks: p.EngineHooks) -> p.EngineHooks:
+        captured_ref = self
+
+        async def capture_usage(
+            ctx: p.EngineContext, payload: Any, exc: Exception | None
+        ) -> p.EngineHookResult:
+            if isinstance(payload, p.MessageGenerationPayload):
+                captured_ref.captured_message = payload.message
+                captured_ref.captured_usage = payload.usage
+            return p.EngineHookResult.CALL_NEXT
+
+        hooks.on_message_generated.append(capture_usage)
+        return hooks
+
+    async def setup(self, server: p.Server) -> None:
+        self.agent = await server.create_agent(name="Token Test Agent", description="")
+
+    async def run(self, ctx: Context) -> None:
+        answer = await ctx.send_and_receive_message(
+            customer_message="Hello", recipient=self.agent
+        )
+
+        assert answer is not None
+        assert self.captured_message is not None, "Хук должен был получить текст сообщения"
+        assert self.captured_usage is not None, "Хук должен был получить UsageInfo"
+        assert self.captured_usage.input_tokens > 0, "Должны быть затрачены входные токены"
+        assert self.captured_usage.output_tokens > 0, "Должны быть затрачены выходные токены"
+
+
 class Test_that_an_agent_can_be_created_with_custom_id(SDKTest):
     async def setup(self, server: p.Server) -> None:
         self.agent = await server.create_agent(

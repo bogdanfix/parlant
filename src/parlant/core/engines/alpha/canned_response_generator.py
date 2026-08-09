@@ -39,7 +39,7 @@ from parlant.core.engines.alpha.guideline_matching.generic.common import (
     GuidelineInternalRepresentation,
     internal_representation,
 )
-from parlant.core.engines.alpha.hooks import EngineHooks
+from parlant.core.engines.alpha.hooks import EngineHooks, MessageGenerationPayload
 from parlant.core.engines.alpha.engine_context import EngineContext
 from parlant.core.engines.alpha.message_event_composer import (
     MessageCompositionError,
@@ -58,7 +58,7 @@ from parlant.core.journeys import Journey
 from parlant.core.tags import Tag
 from parlant.core.canned_responses import CannedResponse, CannedResponseId, CannedResponseStore
 from parlant.core.nlp.generation import SchematicGenerator, StreamingTextGenerator
-from parlant.core.nlp.generation_info import GenerationInfo
+from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder, BuiltInSection
 from parlant.core.glossary import Term
@@ -498,6 +498,12 @@ def _get_response_template_fields(template: str) -> set[str]:
     env = jinja2.Environment()
     parse_result = env.parse(template)
     return jinja2.meta.find_undeclared_variables(parse_result)
+
+
+def _first_usage(generation_info: Mapping[str, GenerationInfo]) -> UsageInfo | None:
+    for info in generation_info.values():
+        return info.usage
+    return None
 
 
 class CannedResponseGenerator(MessageEventComposer):
@@ -1058,6 +1064,7 @@ You will now be given the current state of the interaction to which you must gen
 
         async def output_messages(
             generation_result: _CannedResponseSelectionResult,
+            usage: UsageInfo | None = None,
         ) -> list[EmittedEvent]:
             nonlocal first_message_already_emitted
             emitted_events: list[EmittedEvent] = []
@@ -1075,7 +1082,10 @@ You will now be given the current state of the interaction to which you must gen
                 while sub_messages:
                     m = sub_messages.pop(0)
 
-                    if await self._hooks.call_on_message_generated(loaded_context, payload=m):
+                    if await self._hooks.call_on_message_generated(
+                        loaded_context,
+                        payload=MessageGenerationPayload(message=m, usage=usage),
+                    ):
                         # If we're in, the hook did not bail out.
 
                         handle = await context.event_emitter.emit_message_event(
@@ -1219,7 +1229,10 @@ You will now be given the current state of the interaction to which you must gen
                     latch.enable()
 
                 if generation_result:
-                    emitted_events = await output_messages(generation_result)
+                    emitted_events = await output_messages(
+                        generation_result,
+                        usage=_first_usage(generation_info),
+                    )
                     events += emitted_events
 
                     context.staged_message_events = (
@@ -1265,7 +1278,10 @@ You will now be given the current state of the interaction to which you must gen
 
                         await asyncio.sleep(await policy.get_follow_up_delay())
 
-                        follow_up_response_events = await output_messages(follow_up_canrep_response)
+                        follow_up_response_events = await output_messages(
+                            follow_up_canrep_response,
+                            usage=_first_usage(follow_up_canrep_generation_info),
+                        )
                         events += follow_up_response_events
 
                         if not follow_up_response_events:

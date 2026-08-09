@@ -43,6 +43,7 @@ from parlant.core.engines.alpha.tool_calling.tool_caller import (
 )
 from parlant.core.guidelines import GuidelineId
 from parlant.core.journeys import Journey
+from parlant.core.engines.alpha.hooks import EngineHooks, MessageGenerationPayload
 from parlant.core.nlp.generation import SchematicGenerator
 from parlant.core.nlp.generation_info import GenerationInfo
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
@@ -136,6 +137,7 @@ class MessageGenerator(MessageEventComposer):
         tracer: Tracer,
         optimization_policy: OptimizationPolicy,
         schematic_generator: SchematicGenerator[MessageSchema],
+        hooks: EngineHooks,
     ) -> None:
         self._logger = logger
         self._meter = meter
@@ -143,6 +145,7 @@ class MessageGenerator(MessageEventComposer):
         self._tracer = tracer
         self._optimization_policy = optimization_policy
         self._schematic_generator = schematic_generator
+        self._hooks = hooks
 
         self._hist_message_generation_duration = self._meter.create_duration_histogram(
             "message_generation",
@@ -173,6 +176,7 @@ class MessageGenerator(MessageEventComposer):
                 with self._logger.scope("Message generation"):
                     async with self._hist_message_generation_duration.measure():
                         return await self._do_generate_events(
+                            context=context,
                             start_of_processing=context.creation,
                             event_emitter=context.session_event_emitter,
                             agent=context.agent,
@@ -207,6 +211,7 @@ class MessageGenerator(MessageEventComposer):
 
     async def _do_generate_events(
         self,
+        context: EngineContext,
         start_of_processing: Stopwatch,
         event_emitter: EventEmitter,
         agent: Agent,
@@ -276,6 +281,16 @@ class MessageGenerator(MessageEventComposer):
                     latch.enable()
 
                 if response_message is not None:
+                    if not await self._hooks.call_on_message_generated(
+                        context,
+                        payload=MessageGenerationPayload(
+                            message=response_message,
+                            usage=generation_info.usage,
+                        ),
+                    ):
+                        self._logger.debug("Skipping message; on_message_generated hook bailed")
+                        return [MessageEventComposition({"message_generation": generation_info}, [])]
+
                     handle = await event_emitter.emit_message_event(
                         trace_id=self._tracer.trace_id,
                         data=response_message,

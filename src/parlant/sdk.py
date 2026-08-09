@@ -129,7 +129,7 @@ from parlant.core.engines.types import (
     UtteranceRequest as _UtteranceRequest,
 )
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder, PromptSection
-from parlant.core.engines.alpha.hooks import EngineHook, EngineHookResult, EngineHooks
+from parlant.core.engines.alpha.hooks import EngineHook, EngineHookResult, EngineHooks, MessageGenerationPayload
 from parlant.core.engines.alpha.engine_context import (
     EngineContext,
     LoadedContext,  # type: ignore
@@ -165,6 +165,7 @@ from parlant.core.nlp.generation import (
     SchematicGenerationResult,
     SchematicGenerator,
 )
+from parlant.core.nlp.generation_info import UsageInfo
 from parlant.core.nlp.tokenization import EstimatingTokenizer
 from parlant.core.persistence.common import ObjectId
 from parlant.core.persistence.document_database import DocumentDatabase, identity_loader_for
@@ -5682,6 +5683,7 @@ __all__ = [
     "Logger",
     "MATCH_ALWAYS",
     "MessageEventData",
+    "MessageGenerationPayload",
     "ModelGeneration",
     "ModelSize",
     "ModelType",
@@ -5749,6 +5751,7 @@ __all__ = [
     "ToolParameterType",
     "ToolResult",
     "Tracer",
+    "UsageInfo",
     "Variable",
     "Variable",
     "VoiceOptimizedPerceivedPerformancePolicy",
