@@ -70,6 +70,7 @@ class EventKindDTO(Enum):
     TOOL = "tool"
     STATUS = "status"
     CUSTOM = "custom"
+    INSPECTOR = "inspector"
 
 
 class EventSourceDTO(Enum):
@@ -1273,6 +1274,7 @@ def _event_kind_dto_to_event_kind(dto: EventKindDTO) -> EventKind:
         EventKindDTO.TOOL: EventKind.TOOL,
         EventKindDTO.STATUS: EventKind.STATUS,
         EventKindDTO.CUSTOM: EventKind.CUSTOM,
+        EventKindDTO.INSPECTOR: EventKind.INSPECTOR,
     }.get(dto):
         return kind
 
@@ -1285,6 +1287,7 @@ def _event_kind_to_event_kind_dto(kind: EventKind) -> EventKindDTO:
         EventKind.TOOL: EventKindDTO.TOOL,
         EventKind.STATUS: EventKindDTO.STATUS,
         EventKind.CUSTOM: EventKindDTO.CUSTOM,
+        EventKind.INSPECTOR: EventKindDTO.INSPECTOR,
     }.get(kind):
         return dto
 
