@@ -186,6 +186,28 @@ class EventPublisher(EventEmitter):
 
         return event
 
+    @override
+    async def emit_inspector_event(
+        self,
+        trace_id: str | None = None,
+        data: JSONSerializable | None = None,
+        metadata: Mapping[str, JSONSerializable] | None = None,
+        **kwargs: Any,
+    ) -> EmittedEvent:
+        trace_id = ensure_new_usage_params_and_get_trace_id(trace_id, data, **kwargs)
+
+        event = EmittedEvent(
+            source=EventSource.AI_AGENT,
+            kind=EventKind.INSPECTOR,
+            trace_id=trace_id,
+            data=data,
+            metadata=metadata,
+        )
+
+        await self._publish_event(event)
+
+        return event
+
     async def _publish_event(
         self,
         event: EmittedEvent,

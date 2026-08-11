@@ -309,7 +309,7 @@ Proceed with your task accordingly.
         staged_events: Sequence[EmittedEvent],
     ) -> list[str]:
         combined = list(events) + list(staged_events)
-        return [self.adapt_event(e) for e in combined if e.kind != EventKind.STATUS]
+        return [self.adapt_event(e) for e in combined if e.kind not in (EventKind.STATUS, EventKind.INSPECTOR)]
 
     def _last_agent_message_note(
         self,

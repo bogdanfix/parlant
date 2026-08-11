@@ -109,6 +109,9 @@ class EventKind(Enum):
     CUSTOM = "custom"
     """Represents a custom event, used in custom frontends."""
 
+    INSPECTOR = "inspector"
+    """Represents an inspector event, used for internal state inspection."""
+
 
 @dataclass(frozen=True)
 class Event:

@@ -100,6 +100,17 @@ class EventEmitter(ABC):
         """Emit a custom event with the given trace ID and data."""
         ...
 
+    @abstractmethod
+    async def emit_inspector_event(
+        self,
+        trace_id: str | None,
+        data: JSONSerializable | None = None,
+        metadata: Mapping[str, JSONSerializable] | None = None,
+        **kwargs: Any,
+    ) -> EmittedEvent:
+        """Emit an inspector event with the given trace ID and data."""
+        ...
+
 
 class EventEmitterFactory(ABC):
     """An interface for creating event emitters."""
