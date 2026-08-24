@@ -97,18 +97,26 @@ class ToolContext:
         ] = None,
         emit_custom: Optional[Callable[[JSONSerializable], Awaitable[None]]] = None,
         plugin_data: Mapping[str, Any] = {},
+        premoderation_required: bool = False,
         # this plugin data is used to pass data that is required by the plugin and doesn't go through the LLM evaluation
     ) -> None:
         self.agent_id = agent_id
         self.session_id = session_id
         self.customer_id = customer_id
         self.plugin_data = plugin_data
+        self.premoderation_required = premoderation_required
         self._emit_message = emit_message
         self._emit_status = emit_status
         self._emit_custom = emit_custom
 
     async def emit_message(self, message: str) -> None:
         """Directly emit a message to the session."""
+
+        if self.premoderation_required:
+            raise ToolError(
+                "emit_message",
+                "Direct tool messages are disabled while premoderation is required",
+            )
 
         assert self._emit_message
         await self._emit_message(message)

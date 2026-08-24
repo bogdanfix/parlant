@@ -54,6 +54,7 @@ from parlant.core.sessions import (
     Event,
     EventKind,
     EventSource,
+    MessageEventData,
     Session,
 )
 from parlant.core.common import DefaultBaseModel
@@ -289,11 +290,30 @@ class MessageGenerator(MessageEventComposer):
                         ),
                     ):
                         self._logger.debug("Skipping message; on_message_generated hook bailed")
-                        return [MessageEventComposition({"message_generation": generation_info}, [])]
+                        return [
+                            MessageEventComposition({"message_generation": generation_info}, [])
+                        ]
+
+                    message_data = MessageEventData(
+                        message=response_message,
+                        participant={
+                            "id": context.agent.id,
+                            "display_name": context.agent.name,
+                        },
+                    )
+                    if not await self._hooks.call_on_message_batch_generated(
+                        context, [message_data]
+                    ):
+                        self._logger.debug(
+                            "Skipping message batch; on_message_batch_generated hook bailed"
+                        )
+                        return [
+                            MessageEventComposition({"message_generation": generation_info}, [])
+                        ]
 
                     handle = await event_emitter.emit_message_event(
                         trace_id=self._tracer.trace_id,
-                        data=response_message,
+                        data=message_data,
                     )
 
                     await self._hist_ttfm_duration.record(start_of_processing.elapsed * 1000)
@@ -306,6 +326,10 @@ class MessageGenerator(MessageEventComposer):
                     ]
                 else:
                     self._logger.debug("Skipping response; no response deemed necessary")
+                    if not await self._hooks.call_on_message_batch_generated(context, []):
+                        self._logger.debug(
+                            "Skipping empty message batch; on_message_batch_generated hook bailed"
+                        )
                     return [MessageEventComposition({"message_generation": generation_info}, [])]
             except Exception as exc:
                 self._logger.warning(

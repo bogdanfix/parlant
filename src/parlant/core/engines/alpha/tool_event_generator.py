@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import Mapping, Optional, Sequence
 from parlant.core.customers import Customer
-from parlant.core.engines.alpha.engine_context import EngineContext
+from parlant.core.engines.alpha.engine_context import EngineContext, is_premoderation_required
+from parlant.core.engines.alpha.hooks import EngineHooks, ToolBatchExecution
 from parlant.core.meter import Meter
 from parlant.core.tools import ToolContext
 from parlant.core.tracer import Tracer
@@ -32,7 +33,6 @@ from parlant.core.engines.alpha.tool_calling.tool_caller import (
     ToolCall,
     ToolCallContext,
     ToolCallInferenceResult,
-    ToolCallResult,
     ToolCaller,
     ToolInsights,
 )
@@ -45,6 +45,7 @@ class ToolEventGenerationResult:
     generations: Sequence[GenerationInfo]
     events: Sequence[Optional[EmittedEvent]]
     insights: ToolInsights
+    halted: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,12 +70,14 @@ class ToolEventGenerator:
         tracer: Tracer,
         tool_caller: ToolCaller,
         service_registry: ServiceRegistry,
+        hooks: EngineHooks,
     ) -> None:
         self._logger = logger
         self._tracer = tracer
         self._meter = meter
         self._service_registry = service_registry
         self._tool_caller = tool_caller
+        self._hooks = hooks
 
         self._hist_tool_call_duration = self._meter.create_duration_histogram(
             "tc",
@@ -158,15 +161,35 @@ class ToolEventGenerator:
         self,
         context: EngineContext,
         tool_calls: Sequence[ToolCall],
-    ) -> tuple[Sequence[EmittedEvent], Sequence[ToolCallResult]]:
+    ) -> tuple[ToolBatchExecution, bool]:
         if not tool_calls:
-            return [], []
+            return ToolBatchExecution(calls=[], results=[], events=[]), False
+
+        premoderation_required = is_premoderation_required(context)
 
         tool_context = ToolContext(
             agent_id=context.agent.id,
             session_id=context.session.id,
             customer_id=context.customer.id,
+            premoderation_required=premoderation_required,
         )
+
+        if premoderation_required:
+            consequential_calls: list[ToolCall] = []
+            for tool_call in tool_calls:
+                service = await self._service_registry.read_tool_service(
+                    tool_call.tool_id.service_name
+                )
+                descriptor = await service.resolve_tool(tool_call.tool_id.tool_name, tool_context)
+                if descriptor.consequential:
+                    consequential_calls.append(tool_call)
+
+            if consequential_calls and not (
+                await self._hooks.call_on_consequential_tool_batch_generated(
+                    context, consequential_calls
+                )
+            ):
+                return ToolBatchExecution(calls=tool_calls, results=[], events=[]), True
 
         async with self._hist_tool_call_execution_duration.measure():
             tool_results = await self._tool_caller.execute_tool_calls(
@@ -175,7 +198,7 @@ class ToolEventGenerator:
             )
 
         if not tool_results:
-            return [], []
+            return ToolBatchExecution(calls=tool_calls, results=[], events=[]), False
 
         events: list[EmittedEvent] = []
         for r in tool_results:
@@ -203,7 +226,14 @@ class ToolEventGenerator:
                     )
                 )
 
-        return events, list(tool_results)
+        execution = ToolBatchExecution(
+            calls=tool_calls,
+            results=list(tool_results),
+            events=events,
+        )
+        context.state.tool_events += events
+        halted = not await self._hooks.call_on_tool_batch_executed(context, execution)
+        return execution, halted
 
     async def generate_events(
         self,
@@ -252,53 +282,11 @@ class ToolEventGenerator:
                     insights=inference_result.insights,
                 )
 
-            tool_context = ToolContext(
-                agent_id=context.agent.id,
-                session_id=context.session.id,
-                customer_id=context.customer.id,
-            )
-
-            async with self._hist_tool_call_execution_duration.measure():
-                tool_results = await self._tool_caller.execute_tool_calls(
-                    tool_context,
-                    tool_calls,
-                )
-
-            if not tool_results:
-                return ToolEventGenerationResult(
-                    generations=inference_result.batch_generations,
-                    events=[],
-                    insights=inference_result.insights,
-                )
-
-            events = []
-            for r in tool_results:
-                event_data: ToolEventData = {
-                    "tool_calls": [
-                        {
-                            "tool_id": r.tool_call.tool_id.to_string(),
-                            "arguments": r.tool_call.arguments,
-                            "result": r.result,
-                        }
-                    ]
-                }
-                if r.result["control"].get("lifespan", "session") == "session":
-                    events.append(
-                        await context.session_event_emitter.emit_tool_event(
-                            trace_id=self._tracer.trace_id,
-                            data=event_data,
-                        )
-                    )
-                else:
-                    events.append(
-                        await context.response_event_emitter.emit_tool_event(
-                            trace_id=self._tracer.trace_id,
-                            data=event_data,
-                        )
-                    )
+            execution, halted = await self.execute_tool_calls(context, tool_calls)
 
             return ToolEventGenerationResult(
                 generations=inference_result.batch_generations,
-                events=events,
+                events=execution.events,
                 insights=inference_result.insights,
+                halted=halted,
             )

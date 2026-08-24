@@ -142,6 +142,29 @@ class Interaction:
         return self.events
 
 
+def is_premoderation_required(context: EngineContext) -> bool:
+    """Return whether the current customer cycle requires delivery gates.
+
+    The absence of Impact metadata means this is a regular Parlant cycle. Once
+    the private marker is present, malformed data fails closed.
+    """
+
+    event = context.interaction.last_customer_message_event
+    if not event or not event.metadata or "_impact_private" not in event.metadata:
+        return False
+
+    private = event.metadata["_impact_private"]
+    if not isinstance(private, dict):
+        return True
+
+    cycle = private.get("impact_cycle_v1")
+    if not isinstance(cycle, dict):
+        return True
+
+    required = cycle.get("premoderation_required")
+    return required if isinstance(required, bool) else True
+
+
 @dataclass(frozen=False)
 class ResponseState:
     """Used to access and update the state needed for responding properly"""

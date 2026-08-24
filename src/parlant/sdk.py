@@ -129,7 +129,13 @@ from parlant.core.engines.types import (
     UtteranceRequest as _UtteranceRequest,
 )
 from parlant.core.engines.alpha.prompt_builder import PromptBuilder, PromptSection
-from parlant.core.engines.alpha.hooks import EngineHook, EngineHookResult, EngineHooks, MessageGenerationPayload
+from parlant.core.engines.alpha.hooks import (
+    EngineHook,
+    EngineHookResult,
+    EngineHooks,
+    MessageGenerationPayload,
+    ToolBatchExecution,
+)
 from parlant.core.engines.alpha.engine_context import (
     EngineContext,
     LoadedContext,  # type: ignore
@@ -5684,6 +5690,7 @@ __all__ = [
     "MATCH_ALWAYS",
     "MessageEventData",
     "MessageGenerationPayload",
+    "ToolBatchExecution",
     "ModelGeneration",
     "ModelSize",
     "ModelType",

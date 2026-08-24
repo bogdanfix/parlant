@@ -484,6 +484,7 @@ class CallToolRequest(DefaultBaseModel):
     customer_id: str
     arguments: dict[str, _ToolParameterType]
     engine_context_id: str | None = None
+    premoderation_required: bool = False
 
 
 class _ToolResultShim(DefaultBaseModel):
@@ -740,6 +741,7 @@ class PluginServer:
                 emit_status=emit_status,
                 emit_custom=emit_custom,
                 plugin_data=self.plugin_data,
+                premoderation_required=request.premoderation_required,
             )
 
             func = self.tools[name].function
@@ -919,6 +921,7 @@ class PluginClient(ToolService):
                     "customer_id": context.customer_id,
                     "arguments": arguments,
                     "engine_context_id": engine_context_id,
+                    "premoderation_required": context.premoderation_required,
                 },
             ) as response:
                 if response.status_code == status.HTTP_404_NOT_FOUND:

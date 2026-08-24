@@ -592,7 +592,9 @@ class AlphaEngine(Engine):
             matching_finished = True
 
             context.state.journeys = guideline_and_journey_matching_result.journeys
-            context.state.generation_infos += guideline_and_journey_matching_result.matching_result.batch_generations
+            context.state.generation_infos += (
+                guideline_and_journey_matching_result.matching_result.batch_generations
+            )
         except asyncio.CancelledError:
             extended_thinking_status_task.cancel()
             raise
@@ -637,6 +639,7 @@ class AlphaEngine(Engine):
         new_tool_events: list[EmittedEvent] = []
         tool_insights = ToolInsights()
         tool_results: Sequence[ToolCallResult] = []
+        tool_execution_halted = False
 
         with self._tracer.span(_TOOL_CALLER_SPAN_NAME):
             inference_result = await self._tool_event_generator.infer_tool_calls(
@@ -651,17 +654,33 @@ class AlphaEngine(Engine):
                 tool_calls = await plan.on_tools_inferred(context, inference_result)
 
                 if tool_calls:
-                    events, tool_results = await self._tool_event_generator.execute_tool_calls(
-                        context, tool_calls
-                    )
-                    new_tool_events = list(events)
+                    (
+                        execution,
+                        tool_execution_halted,
+                    ) = await self._tool_event_generator.execute_tool_calls(context, tool_calls)
+                    tool_results = execution.results
+                    new_tool_events = list(execution.events)
 
         # Update tool insights (explaining, for example, why tools weren't called)
         context.state.tool_insights = tool_insights
 
         if new_tool_events:
-            context.state.tool_events += new_tool_events
             self._add_tool_events_to_tracer(new_tool_events)
+
+        if tool_execution_halted:
+            return _PreparationIterationResult(
+                state=IterationState(
+                    matched_guidelines=guideline_and_journey_matching_result.matched_guidelines,
+                    resolved_guidelines=guideline_and_journey_matching_result.resolved_guidelines,
+                    tool_insights=tool_insights,
+                    executed_tools=[
+                        ToolId.from_string(tool_call["tool_id"])
+                        for tool_event in new_tool_events
+                        for tool_call in cast(ToolEventData, tool_event.data)["tool_calls"]
+                    ],
+                ),
+                resolution=_PreparationIterationResolution.BAIL,
+            )
 
         # Let the plan react to the tool call results.
         await plan.on_tools_called(context, tool_results)
@@ -708,7 +727,9 @@ class AlphaEngine(Engine):
         # - Dorzo
         context.state.journeys += guideline_and_journey_matching_result.journeys
 
-        context.state.generation_infos += guideline_and_journey_matching_result.matching_result.batch_generations
+        context.state.generation_infos += (
+            guideline_and_journey_matching_result.matching_result.batch_generations
+        )
 
         # Matched guidelines may use glossary terms, so we need to ground our
         # response by reevaluating the relevant terms given these new guidelines.
@@ -740,6 +761,7 @@ class AlphaEngine(Engine):
         new_tool_events: list[EmittedEvent] = []
         tool_insights = ToolInsights()
         tool_results: Sequence[ToolCallResult] = []
+        tool_execution_halted = False
 
         with self._tracer.span(_TOOL_CALLER_SPAN_NAME):
             inference_result = await self._tool_event_generator.infer_tool_calls(
@@ -754,10 +776,12 @@ class AlphaEngine(Engine):
                 tool_calls = await plan.on_tools_inferred(context, inference_result)
 
                 if tool_calls:
-                    events, tool_results = await self._tool_event_generator.execute_tool_calls(
-                        context, tool_calls
-                    )
-                    new_tool_events = list(events)
+                    (
+                        execution,
+                        tool_execution_halted,
+                    ) = await self._tool_event_generator.execute_tool_calls(context, tool_calls)
+                    tool_results = execution.results
+                    new_tool_events = list(execution.events)
 
         # Update tool insights (explaining, for example, why tools weren't called)
         context.state.tool_insights = ToolInsights(
@@ -773,8 +797,22 @@ class AlphaEngine(Engine):
         )
 
         if new_tool_events:
-            context.state.tool_events += new_tool_events
             self._add_tool_events_to_tracer(new_tool_events)
+
+        if tool_execution_halted:
+            return _PreparationIterationResult(
+                state=IterationState(
+                    matched_guidelines=guideline_and_journey_matching_result.matched_guidelines,
+                    resolved_guidelines=guideline_and_journey_matching_result.resolved_guidelines,
+                    tool_insights=tool_insights,
+                    executed_tools=[
+                        ToolId.from_string(tool_call["tool_id"])
+                        for tool_event in new_tool_events
+                        for tool_call in cast(ToolEventData, tool_event.data)["tool_calls"]
+                    ],
+                ),
+                resolution=_PreparationIterationResolution.BAIL,
+            )
 
         # Let the plan react to the tool call results.
         await plan.on_tools_called(context, tool_results)

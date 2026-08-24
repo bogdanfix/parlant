@@ -23,6 +23,9 @@ from parlant.core.guidelines import GuidelineId
 from parlant.core.journeys import JourneyId
 from parlant.core.nlp.generation_info import UsageInfo
 from parlant.core.engines.alpha.guideline_matching.guideline_match import GuidelineMatch
+from parlant.core.emissions import EmittedEvent
+from parlant.core.engines.alpha.tool_calling.tool_caller import ToolCall, ToolCallResult
+from parlant.core.sessions import MessageEventData
 
 
 class EngineHookResult(Enum):
@@ -63,6 +66,13 @@ class MessageGenerationPayload:
     usage: Optional[UsageInfo] = None
 
 
+@dataclass(frozen=True)
+class ToolBatchExecution:
+    calls: Sequence[ToolCall]
+    results: Sequence[ToolCallResult]
+    events: Sequence[EmittedEvent]
+
+
 @dataclass(frozen=False)
 class EngineHooks:
     on_error: list[EngineHook] = field(default_factory=list)
@@ -100,6 +110,15 @@ class EngineHooks:
 
     on_message_generated: list[EngineHook] = field(default_factory=list)
     """Called right after a message was generated (but not yet emitted)"""
+
+    on_message_batch_generated: list[EngineHook] = field(default_factory=list)
+    """Called after a complete response message batch was prepared, before any emit"""
+
+    on_consequential_tool_batch_generated: list[EngineHook] = field(default_factory=list)
+    """Called before executing a batch containing consequential tool calls"""
+
+    on_tool_batch_executed: list[EngineHook] = field(default_factory=list)
+    """Called after tool results were emitted and before the next preparation iteration"""
 
     on_messages_emitted: list[EngineHook] = field(default_factory=list)
     """Called right after all messages were emitted into the session"""
@@ -161,6 +180,21 @@ class EngineHooks:
         self, context: EngineContext, payload: MessageGenerationPayload
     ) -> bool:
         return await self.call_hooks(self.on_message_generated, context, payload)
+
+    async def call_on_message_batch_generated(
+        self, context: EngineContext, payload: Sequence[MessageEventData]
+    ) -> bool:
+        return await self.call_hooks(self.on_message_batch_generated, context, payload)
+
+    async def call_on_consequential_tool_batch_generated(
+        self, context: EngineContext, payload: Sequence[ToolCall]
+    ) -> bool:
+        return await self.call_hooks(self.on_consequential_tool_batch_generated, context, payload)
+
+    async def call_on_tool_batch_executed(
+        self, context: EngineContext, payload: ToolBatchExecution
+    ) -> bool:
+        return await self.call_hooks(self.on_tool_batch_executed, context, payload)
 
     async def call_on_messages_emitted(self, context: EngineContext) -> bool:
         return await self.call_hooks(self.on_messages_emitted, context, None)
