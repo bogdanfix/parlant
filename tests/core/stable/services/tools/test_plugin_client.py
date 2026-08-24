@@ -279,6 +279,23 @@ def test_that_invalid_boolean_argument_is_rejected() -> None:
         cast_tool_argument(bool, "not-a-boolean")
 
 
+def test_that_empty_optional_enum_argument_is_none() -> None:
+    class TypeFilter(enum.Enum):
+        GENERAL = "general"
+
+    parameter_type = Annotated[Optional[TypeFilter], ToolParameterOptions()]
+
+    assert cast_tool_argument(parameter_type, "") is None
+
+
+def test_that_invalid_optional_enum_argument_is_rejected() -> None:
+    class TypeFilter(enum.Enum):
+        GENERAL = "general"
+
+    with raises(ToolExecutionError):
+        cast_tool_argument(Optional[TypeFilter], "unknown")
+
+
 async def test_that_a_plugin_calls_a_tool(tool_context: ToolContext, container: Container) -> None:
     @tool
     def my_tool(context: ToolContext, arg_1: int, arg_2: int) -> ToolResult:

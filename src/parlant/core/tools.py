@@ -562,6 +562,7 @@ def cast_tool_argument(parameter_type: Any, argument: Any) -> Any:
             return argument
 
         cast_target = parameter_type
+        is_optional = False
         # If parameter_type is Annotated -> get the inner type
         if getattr(cast_target, "__name__", None) == "Annotated":
             cast_target = get_args(cast_target)[0]
@@ -569,7 +570,17 @@ def cast_tool_argument(parameter_type: Any, argument: Any) -> Any:
         # For Optional parameters - use the inner type
         if get_origin(cast_target) is Union or get_origin(cast_target) is UnionType:
             args = get_args(cast_target)
+            is_optional = type(None) in args
             cast_target = next((arg for arg in args if arg is not type(None)), None)
+
+        if (
+            is_optional
+            and isinstance(argument, str)
+            and not argument.strip()
+            and isinstance(cast_target, type)
+            and issubclass(cast_target, Enum)
+        ):
+            return None
 
         # If parameter_type is a list -> split it and run recursively on the items
         if get_origin(cast_target) is list:
