@@ -1506,6 +1506,45 @@ async def test_that_a_custom_event_can_be_read(
     assert event["data"] == custom_event_data
 
 
+async def test_that_an_inspector_event_can_be_read_and_filtered(
+    async_client: httpx.AsyncClient,
+    container: Container,
+    session_id: SessionId,
+) -> None:
+    inspector_event_data = {
+        "schema": "builder.dialog-inspector.v1",
+        "phase": "generated",
+    }
+
+    await populate_session_id(
+        container,
+        session_id,
+        [
+            make_event_params(
+                EventSource.AI_AGENT,
+                data=inspector_event_data,
+                kind=EventKind.INSPECTOR,
+            ),
+            make_event_params(EventSource.CUSTOMER, kind=EventKind.CUSTOM),
+        ],
+    )
+
+    data = (
+        (
+            await async_client.get(
+                f"/sessions/{session_id}/events",
+                params={"kinds": EventKind.INSPECTOR.value},
+            )
+        )
+        .raise_for_status()
+        .json()
+    )
+
+    assert len(data) == 1
+    assert data[0]["kind"] == EventKind.INSPECTOR.value
+    assert data[0]["data"] == inspector_event_data
+
+
 async def test_that_a_custom_event_can_be_created(
     async_client: httpx.AsyncClient,
     container: Container,
