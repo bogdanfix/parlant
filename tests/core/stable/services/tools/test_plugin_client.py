@@ -279,16 +279,6 @@ def test_that_invalid_boolean_argument_is_rejected() -> None:
         cast_tool_argument(bool, "not-a-boolean")
 
 
-def test_that_a_serialized_list_nested_in_a_single_list_item_is_flattened() -> None:
-    assert cast_tool_argument(list[str], ["['promotions']"]) == ["promotions"]
-    assert cast_tool_argument(list[str], ["promotions"]) == ["promotions"]
-
-
-def test_that_an_invalid_serialized_list_nested_in_a_single_list_item_is_rejected() -> None:
-    with raises(ToolExecutionError):
-        cast_tool_argument(list[str], ["[promotions]"])
-
-
 async def test_that_a_plugin_calls_a_tool(tool_context: ToolContext, container: Container) -> None:
     @tool
     def my_tool(context: ToolContext, arg_1: int, arg_2: int) -> ToolResult:

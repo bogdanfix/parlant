@@ -609,14 +609,6 @@ def cast_tool_argument(parameter_type: Any, argument: Any) -> Any:
 
 def split_arg_list(argument: str | list[Any], item_type: Any) -> list[str]:
     if isinstance(argument, list):
-        if len(argument) == 1 and isinstance(argument[0], str):
-            nested_argument = argument[0].strip()
-            if nested_argument.startswith("[") and nested_argument.endswith("]"):
-                nested_list = literal_eval(nested_argument)
-                if not isinstance(nested_list, list):
-                    raise TypeError(f"Expected a serialized list, got {nested_argument}")
-                return nested_list
-
         # Already a list - no work required
         return argument
     if item_type is str or issubclass(item_type, Enum):
