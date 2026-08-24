@@ -351,6 +351,17 @@ def _tool_decorator_impl(
     def _describe_parameters(
         func: ToolFunction,
     ) -> dict[str, tuple[ToolParameterDescriptor, ToolParameterOptions]]:
+        def _marshal_default(value: Any) -> Any:
+            if isinstance(value, enum.Enum):
+                return value.value
+            if isinstance(value, BaseModel):
+                return value.model_dump(mode="json")
+            if isinstance(value, (date, datetime)):
+                return value.isoformat()
+            if isinstance(value, list):
+                return [_marshal_default(item) for item in value]
+            return value
+
         type_to_param_type: dict[type[_ToolParameterType], ToolParameterType] = {
             str: "string",
             int: "integer",
@@ -408,6 +419,11 @@ def _tool_decorator_impl(
                     param_descriptor["description"] = options.description
                 if options.examples:
                     param_descriptor["examples"] = options.examples
+
+            if p.default is not inspect.Parameter.empty:
+                param_descriptor["default"] = _marshal_default(p.default)
+            elif param_info.is_optional:
+                param_descriptor["default"] = None
 
             param_descriptors[p.name] = (
                 param_descriptor,

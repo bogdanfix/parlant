@@ -13,9 +13,10 @@
 # limitations under the License.
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
 import enum
 import json
+import warnings
 from typing import Annotated, Any, Mapping, Optional, cast
 from lagom import Container
 from pydantic import BaseModel
@@ -24,8 +25,11 @@ import pytest
 
 from parlant.core.loggers import StdoutLogger
 from parlant.core.tools import (
+    cast_tool_argument,
+    materialize_tool_arguments,
     ToolContext,
     ToolError,
+    ToolExecutionError,
     ToolParameterOptions,
     ToolResult,
     ToolResultError,
@@ -38,7 +42,6 @@ from parlant.core.emission.event_buffer import EventBuffer, EventBufferFactory
 from parlant.core.emissions import EventEmitter, EventEmitterFactory
 from parlant.core.services.tools.plugins import PluginClient
 from parlant.core.sessions import SessionId, EventKind
-from parlant.core.tools import ToolExecutionError
 from tests.test_utilities import run_service_server
 
 
@@ -165,6 +168,115 @@ async def test_that_a_plugin_reads_a_tool(container: Container) -> None:
                             param_options.model_dump()[option_name]
                             == returned_param_options.model_dump()[option_name]
                         )
+
+
+async def test_that_typed_parameter_examples_are_serialized_without_warnings(
+    container: Container,
+) -> None:
+    @tool
+    def my_tool(
+        context: ToolContext,
+        queries: Annotated[
+            list[str], ToolParameterOptions(examples=[["promotions"], ["discounts"]])
+        ],
+        include_media: Annotated[bool, ToolParameterOptions(examples=[False, True])],
+    ) -> ToolResult:
+        return ToolResult({})
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        async with run_service_server([my_tool]) as server:
+            async with create_client(server, container[EventBufferFactory]) as client:
+                returned_tool = await client.read_tool(my_tool.tool.name)
+
+    assert returned_tool.parameters["queries"][0]["examples"] == [
+        ["promotions"],
+        ["discounts"],
+    ]
+    assert returned_tool.parameters["include_media"][0]["examples"] == [False, True]
+
+
+async def test_that_parameter_defaults_are_serialized_with_their_effective_types(
+    container: Container,
+) -> None:
+    class SearchType(enum.Enum):
+        GENERAL = "general"
+
+    @tool
+    def my_tool(
+        context: ToolContext,
+        include_media: bool = False,
+        queries: list[str] = ["promotions"],
+        search_type: SearchType = SearchType.GENERAL,
+        since: date = date(2026, 8, 24),
+        note: Optional[str] = None,
+    ) -> ToolResult:
+        return ToolResult({})
+
+    async with run_service_server([my_tool]) as server:
+        async with create_client(server, container[EventBufferFactory]) as client:
+            returned_tool = await client.read_tool(my_tool.tool.name)
+
+    assert returned_tool.parameters["include_media"][0]["default"] is False
+    assert returned_tool.parameters["queries"][0]["default"] == ["promotions"]
+    assert returned_tool.parameters["search_type"][0]["default"] == "general"
+    assert returned_tool.parameters["since"][0]["default"] == "2026-08-24"
+    assert returned_tool.parameters["note"][0]["default"] is None
+
+    effective_arguments = materialize_tool_arguments(
+        returned_tool,
+        {"include_media": "<<__missing__>>"},
+    )
+    assert effective_arguments == {
+        "include_media": False,
+        "queries": ["promotions"],
+        "search_type": "general",
+        "since": "2026-08-24",
+        "note": None,
+    }
+
+
+async def test_that_false_string_is_cast_to_false_when_a_plugin_tool_is_called(
+    tool_context: ToolContext,
+    container: Container,
+) -> None:
+    @tool
+    def my_tool(context: ToolContext, enabled: bool) -> ToolResult:
+        return ToolResult(enabled)
+
+    async with run_service_server([my_tool]) as server:
+        async with create_client(server, container[EventBufferFactory]) as client:
+            result = await client.call_tool(
+                my_tool.tool.name,
+                tool_context,
+                arguments={"enabled": "False"},
+            )
+
+    assert result.data is False
+
+
+async def test_that_native_false_is_preserved_when_a_plugin_tool_is_called(
+    tool_context: ToolContext,
+    container: Container,
+) -> None:
+    @tool
+    def my_tool(context: ToolContext, enabled: bool) -> ToolResult:
+        return ToolResult(enabled)
+
+    async with run_service_server([my_tool]) as server:
+        async with create_client(server, container[EventBufferFactory]) as client:
+            result = await client.call_tool(
+                my_tool.tool.name,
+                tool_context,
+                arguments={"enabled": False},
+            )
+
+    assert result.data is False
+
+
+def test_that_invalid_boolean_argument_is_rejected() -> None:
+    with raises(ToolExecutionError):
+        cast_tool_argument(bool, "not-a-boolean")
 
 
 async def test_that_a_plugin_calls_a_tool(tool_context: ToolContext, container: Container) -> None:

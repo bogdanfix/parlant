@@ -16,7 +16,7 @@ import ast
 from enum import Enum
 import json
 import traceback
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, cast
 from parlant.core.agents import Agent
 from parlant.core.common import DefaultBaseModel, generate_id
 from parlant.core.context_variables import ContextVariable, ContextVariableValue
@@ -32,7 +32,7 @@ from parlant.core.meter import Meter
 from parlant.core.nlp.generation import SchematicGenerator
 from parlant.core.nlp.generation_info import GenerationInfo
 from parlant.core.services.tools.service_registry import ServiceRegistry
-from parlant.core.sessions import Event, EventKind
+from parlant.core.sessions import Event, EventKind, ToolEventData
 from parlant.core.shots import Shot, ShotCollection
 from dataclasses import dataclass
 from parlant.core.engines.alpha.tool_calling.tool_caller import (
@@ -48,7 +48,14 @@ from parlant.core.engines.alpha.tool_calling.tool_caller import (
     ToolInsights,
     measure_tool_call_batch,
 )
-from parlant.core.tools import Tool, ToolId, ToolParameterDescriptor, ToolParameterOptions
+from parlant.core.tools import (
+    Tool,
+    ToolId,
+    ToolParameterDescriptor,
+    ToolParameterOptions,
+    is_missing_tool_argument,
+    materialize_tool_arguments,
+)
 
 
 class ValidationStatus(Enum):
@@ -219,6 +226,18 @@ class OverlappingToolsBatch(ToolCallBatch):
                 return tool_id, tool
         return None
 
+    def _is_tool_call_already_staged(self, tool_id: ToolId, arguments: dict[str, Any]) -> bool:
+        for event in self._context.staged_events:
+            if event.kind == EventKind.TOOL:
+                tool_calls = cast(ToolEventData, event.data).get("tool_calls", [])
+                for tool_call in tool_calls:
+                    if (
+                        tool_call.get("tool_id") == tool_id.to_string()
+                        and tool_call.get("arguments") == arguments
+                    ):
+                        return True
+        return False
+
     async def _validate_argument_value(
         self,
         parameter: tuple[ToolParameterDescriptor, ToolParameterOptions],
@@ -283,30 +302,21 @@ class OverlappingToolsBatch(ToolCallBatch):
                                 )
 
                 for tc in tool_inference.calls:
-                    if not tc.same_call_is_already_staged:
-                        if all(
-                            not evaluation.valid_invalid_or_missing == ValidationStatus.MISSING
-                            for evaluation in tc.argument_evaluations or []
-                            if evaluation.parameter_name in tool.required
-                        ):
+                    raw_arguments = {
+                        evaluation.parameter_name: evaluation.value_as_string
+                        for evaluation in tc.argument_evaluations or []
+                        if evaluation.parameter_name in tool.parameters
+                        and evaluation.valid_invalid_or_missing != ValidationStatus.MISSING
+                        and not is_missing_tool_argument(evaluation.value_as_string)
+                    }
+                    arguments = materialize_tool_arguments(tool, raw_arguments)
+
+                    if not self._is_tool_call_already_staged(tool_id, arguments):
+                        if all(parameter_name in raw_arguments for parameter_name in tool.required):
                             self._logger.debug(
                                 f"Inference::Completion::Activated: {tool_id.to_string()}\n{tc.model_dump_json(indent=2)}"
                             )
 
-                            arguments = {}
-
-                            if tool.parameters:  # We check this because sometimes LLMs hallucinate placeholders for no-param tools
-                                for evaluation in tc.argument_evaluations or []:
-                                    if (
-                                        evaluation.valid_invalid_or_missing
-                                        == ValidationStatus.MISSING
-                                    ):
-                                        continue
-
-                                    # Note that if LLM provided 'None' for a required parameter with a default - it will get 'None' as value
-                                    arguments[evaluation.parameter_name] = (
-                                        evaluation.value_as_string
-                                    )
                             if all_values_valid:
                                 tool_calls.append(
                                     ToolCall(
@@ -605,6 +615,9 @@ You need to have tools_evaluation for each tool in the tools batch. Also, note t
 
             if examples := descriptor.get("examples"):
                 result["extraction_examples__only_for_reference"] = examples
+
+            if "default" in descriptor:
+                result["schema"]["default"] = descriptor["default"]
 
             match options.source:
                 case "any":

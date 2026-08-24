@@ -356,6 +356,15 @@ async def test_that_a_plugin_tool_is_called_with_required_parameters_with_defaul
     assert len(tool_calls) == 1
     tool_call = tool_calls[0]
     assert "when" in tool_call.arguments
+    assert tool_call.arguments["type"] == "general"
+    assert tool_call.arguments["room"] == "phone booth"
+    assert tool_call.arguments["number_of_invites"] == 3
+    assert tool_call.arguments["required_participants"] == [
+        "Donald Trump",
+        "Donald Duck",
+        "Ronald McDonald",
+    ]
+    assert tool_call.arguments["meeting_owner"] == "Donald Trump"
 
 
 async def test_that_a_tool_from_a_plugin_gets_called_with_an_enum_list_parameter(

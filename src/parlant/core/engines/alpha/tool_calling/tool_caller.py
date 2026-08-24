@@ -20,7 +20,7 @@ from enum import Enum
 import json
 import time
 import traceback
-from typing import AsyncIterator, Mapping, NewType, Optional, Sequence
+from typing import Any, AsyncIterator, Mapping, NewType, Optional, Sequence
 
 from parlant.core import async_utils
 from parlant.core.agents import Agent
@@ -79,7 +79,7 @@ class ProblematicToolData:
     parameter: str
     significance: Optional[str] = field(default=None)
     description: Optional[str] = field(default=None)
-    examples: Optional[Sequence[str]] = field(default=None)
+    examples: Optional[Sequence[Any]] = field(default=None)
     precedence: Optional[int] = field(default=DEFAULT_PARAMETER_PRECEDENCE)
     choices: Optional[Sequence[str]] = field(default=None)
 

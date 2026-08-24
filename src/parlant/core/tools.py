@@ -66,7 +66,8 @@ class ToolParameterDescriptor(TypedDict, total=False):
     item_type: ToolParameterType
     enum: Sequence[str]
     description: str
-    examples: Sequence[str]
+    examples: Sequence[Any]
+    default: Any
 
 
 # These two aliases are redefined here to avoid a circular reference.
@@ -522,6 +523,24 @@ def validate_tool_arguments(
         raise ToolExecutionError(message)
 
 
+def is_missing_tool_argument(argument: Any) -> bool:
+    return argument is None or argument == "<<__missing__>>" or argument == "['<<__missing__>>']"
+
+
+def materialize_tool_arguments(tool: Tool, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    effective_arguments = {
+        name: value
+        for name, value in arguments.items()
+        if name in tool.parameters and not is_missing_tool_argument(value)
+    }
+
+    for name, (descriptor, _) in tool.parameters.items():
+        if name not in tool.required and name not in effective_arguments:
+            effective_arguments[name] = descriptor.get("default")
+
+    return effective_arguments
+
+
 def normalize_tool_arguments(
     parameters: Mapping[str, inspect.Parameter],
     arguments: Mapping[str, Any],
@@ -565,7 +584,15 @@ def cast_tool_argument(parameter_type: Any, argument: Any) -> Any:
         if cast_target is date:
             return date.fromisoformat(argument)
         if cast_target is bool:
-            return bool(argument.capitalize())
+            if isinstance(argument, bool):
+                return argument
+            if isinstance(argument, str):
+                normalized_argument = argument.strip().lower()
+                if normalized_argument == "true":
+                    return True
+                if normalized_argument == "false":
+                    return False
+            raise ValueError(f"Unsupported boolean value: {argument}")
         if issubclass(cast_target, BaseModel):
             return TypeAdapter(cast_target).validate_json(argument)
         if issubclass(cast_target, Enum) or cast_target in VALID_TOOL_BASE_TYPES:

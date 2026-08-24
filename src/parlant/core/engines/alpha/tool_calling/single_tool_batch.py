@@ -52,7 +52,14 @@ from parlant.core.nlp.generation_info import GenerationInfo, UsageInfo
 from parlant.core.services.tools.service_registry import ServiceRegistry
 from parlant.core.sessions import Event, EventKind, ToolEventData
 from parlant.core.shots import Shot, ShotCollection
-from parlant.core.tools import Tool, ToolId, ToolParameterDescriptor, ToolParameterOptions
+from parlant.core.tools import (
+    Tool,
+    ToolId,
+    ToolParameterDescriptor,
+    ToolParameterOptions,
+    is_missing_tool_argument,
+    materialize_tool_arguments,
+)
 
 
 class ValidationStatus(Enum):
@@ -406,33 +413,25 @@ class SingleToolBatch(ToolCallBatch):
 
                     evaluations.append((tool_id, ToolCallEvaluation.CANNOT_RUN))
 
+            raw_arguments = {
+                evaluation.parameter_name: evaluation.value_as_string
+                for evaluation in tc.argument_evaluations or []
+                if evaluation.parameter_name in tool.parameters
+                and evaluation.valid_invalid_or_missing != ValidationStatus.MISSING
+                and not is_missing_tool_argument(evaluation.value_as_string)
+            }
+            arguments = materialize_tool_arguments(tool, raw_arguments)
+            missing_required = [name for name in tool.required if name not in raw_arguments]
+
             if (
                 tc.is_applicable
-                and not tc.same_call_is_already_staged
+                and not self._is_tool_call_already_staged(tool_id, arguments)
                 and (
                     not tc.a_rejected_tool_would_have_been_a_better_fit_if_it_werent_already_rejected
                     or tc.the_better_rejected_tool_should_clearly_be_run_in_tandem_with_the_candidate_tool
                 )
             ):
-                if all(
-                    not evaluation.valid_invalid_or_missing == ValidationStatus.MISSING
-                    for evaluation in tc.argument_evaluations or []
-                    if evaluation.parameter_name in tool.required
-                ):
-                    arguments = {}
-
-                    if tool.parameters:  # We check this because sometimes LLMs hallucinate placeholders for no-param tools
-                        for evaluation in tc.argument_evaluations or []:
-                            if evaluation.valid_invalid_or_missing == ValidationStatus.MISSING:
-                                continue
-
-                            # Note that if LLM provided 'None' for a required parameter with a default - it will get 'None' as value
-                            arguments[evaluation.parameter_name] = evaluation.value_as_string
-
-                        for param_name in tool.parameters:
-                            if param_name not in tool.required and param_name not in arguments:
-                                arguments[param_name] = None
-
+                if not missing_required:
                     if all_values_valid:
                         self._logger.debug(
                             f"Inference::Completion::Activated: {tool_id.to_string()}:\n{tc.model_dump_json(indent=2)}"
@@ -830,6 +829,9 @@ However, note that you may choose to have multiple entries in 'tool_calls_for_ca
 
             if examples := descriptor.get("examples"):
                 result["extraction_examples__only_for_reference"] = examples
+
+            if "default" in descriptor:
+                result["schema"]["default"] = descriptor["default"]
 
             match options.source:
                 case "any":
@@ -1261,12 +1263,6 @@ OUTPUT FORMAT:
         list[MissingToolData],
         list[InvalidToolData],
     ]:
-        MISSING_VALUE = "<<__missing__>>"
-        MISSING_ARRAY_VALUE = "['<<__missing__>>']"
-
-        def is_missing_value(value: str | None) -> bool:
-            return value == MISSING_VALUE or value == MISSING_ARRAY_VALUE
-
         tool_id, tool, _ = candidate_descriptor
         tool_calls: list[ToolCall] = []
         evaluations: list[tuple[ToolId, ToolCallEvaluation]] = []
@@ -1274,29 +1270,17 @@ OUTPUT FORMAT:
         invalid_data: list[InvalidToolData] = []
 
         for tc in output:
-            if not self._is_tool_call_already_staged(tool_id, tc.args):
-                arguments: dict[str, str | None] = {}
+            raw_arguments = {
+                name: value
+                for name, value in (tc.args or {}).items()
+                if name in tool.parameters and not is_missing_tool_argument(value)
+            }
+            arguments = materialize_tool_arguments(tool, raw_arguments)
 
-                for param_name, param_value in (tc.args or {}).items():
-                    if param_name in tool.parameters:
-                        arguments[param_name] = param_value
-
-                # Check if all required parameters are present
-                missing_required = [r for r in tool.required if r not in arguments] + [
-                    name
-                    for name, value in arguments.items()
-                    if name in tool.required and is_missing_value(value)
-                ]
+            if not self._is_tool_call_already_staged(tool_id, arguments):
+                missing_required = [name for name in tool.required if name not in raw_arguments]
 
                 if not missing_required:
-                    # Set optional params that are absent or missing to None
-                    for param_name in tool.parameters:
-                        if param_name not in tool.required:
-                            if param_name not in arguments or is_missing_value(
-                                arguments[param_name]
-                            ):
-                                arguments[param_name] = None
-
                     tool_calls.append(
                         ToolCall(
                             id=ToolCallId(generate_id()),
