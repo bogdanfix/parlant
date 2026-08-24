@@ -6,11 +6,17 @@
 import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
-from typing import Coroutine, cast
+from typing import Any, Coroutine, cast
 from unittest.mock import AsyncMock
 
 from parlant.core.app_modules.sessions import SessionModule
-from parlant.core.sessions import EventId, Session, SessionId
+from parlant.core.background_tasks import BackgroundTaskService
+from parlant.core.sessions import EventId, Session, SessionId, SessionStore
+from parlant.core.tracer import Tracer
+
+
+async def wait_forever() -> None:
+    await asyncio.Event().wait()
 
 
 class BackgroundTasks:
@@ -23,7 +29,9 @@ class BackgroundTasks:
         self.cancelled_tags.append(tag)
         self.task.cancel(reason)
 
-    async def restart(self, coroutine: Coroutine[object, object, None], *, tag: str) -> asyncio.Task[None]:
+    async def restart(
+        self, coroutine: Coroutine[object, object, None], *, tag: str
+    ) -> asyncio.Task[None]:
         self.restarted_tags.append(tag)
         self.task = asyncio.create_task(coroutine)
         return self.task
@@ -37,10 +45,10 @@ def module_with_task(
     module = SessionModule.__new__(SessionModule)
     background_tasks = BackgroundTasks(task)
     module._session_store = cast(
-        object,
+        SessionStore,
         SimpleNamespace(read_session=AsyncMock(return_value=None)),
     )
-    module._background_task_service = cast(object, background_tasks)
+    module._background_task_service = cast(BackgroundTaskService, background_tasks)
     module._processing_tasks = {session_id: (trigger_event_id, task)}
     module._processing_tasks_lock = asyncio.Lock()
     return module, background_tasks
@@ -49,7 +57,7 @@ def module_with_task(
 async def test_that_matching_trigger_cancels_current_processing() -> None:
     session_id = SessionId("session-1")
     trigger_event_id = EventId("event-1")
-    task = asyncio.create_task(asyncio.Event().wait())
+    task = asyncio.create_task(wait_forever())
     module, background_tasks = module_with_task(session_id, trigger_event_id, task)
 
     assert await module.cancel_processing(session_id, trigger_event_id) == "cancelled"
@@ -61,7 +69,7 @@ async def test_that_matching_trigger_cancels_current_processing() -> None:
 
 async def test_that_old_trigger_does_not_cancel_new_processing() -> None:
     session_id = SessionId("session-1")
-    task = asyncio.create_task(asyncio.Event().wait())
+    task = asyncio.create_task(wait_forever())
     module, background_tasks = module_with_task(session_id, EventId("event-2"), task)
 
     assert await module.cancel_processing(session_id, EventId("event-1")) == "not_current"
@@ -85,10 +93,10 @@ async def test_that_finished_processing_returns_already_finished() -> None:
 
 async def test_that_next_inbound_dispatch_replaces_cancelled_processing() -> None:
     session_id = SessionId("session-1")
-    old_task = asyncio.create_task(asyncio.Event().wait())
+    old_task = asyncio.create_task(wait_forever())
     module, background_tasks = module_with_task(session_id, EventId("event-1"), old_task)
-    module._tracer = cast(object, SimpleNamespace(trace_id="trace-2"))
-    module._process_session = AsyncMock(side_effect=lambda _: asyncio.Event().wait())
+    module._tracer = cast(Tracer, SimpleNamespace(trace_id="trace-2"))
+    cast(Any, module)._process_session = AsyncMock(side_effect=lambda _: wait_forever())
 
     assert await module.cancel_processing(session_id, EventId("event-1")) == "cancelled"
     await asyncio.sleep(0)

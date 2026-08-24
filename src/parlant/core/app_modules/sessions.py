@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Mapping, Sequence, Set
+from typing import Any, Literal, Mapping, Sequence, Set
 
 from parlant.core.agents import AgentId, AgentStore
 from parlant.core.async_utils import Timeout
@@ -123,6 +123,8 @@ class SessionModule:
         self._engine = engine
         self._event_emitter_factory = event_emitter_factory
         self._background_task_service = background_task_service
+        self._processing_tasks: dict[SessionId, tuple[EventId | None, asyncio.Task[None]]] = {}
+        self._processing_tasks_lock = asyncio.Lock()
 
         self._lock = asyncio.Lock()
 
@@ -277,7 +279,7 @@ class SessionModule:
 
         if trigger_processing:
             session = await self._session_store.read_session(session_id)
-            await self.dispatch_processing_task(session)
+            await self.dispatch_processing_task(session, trigger_event_id=event.id)
 
         return event
 
@@ -417,13 +419,39 @@ class SessionModule:
 
         return event
 
-    async def dispatch_processing_task(self, session: Session) -> str:
-        await self._background_task_service.restart(
-            self._process_session(session),
-            tag=f"process-session({session.id})",
-        )
+    async def dispatch_processing_task(
+        self,
+        session: Session,
+        trigger_event_id: EventId | None = None,
+    ) -> str:
+        async with self._processing_tasks_lock:
+            task = await self._background_task_service.restart(
+                self._process_session(session),
+                tag=f"process-session({session.id})",
+            )
+            self._processing_tasks[session.id] = (trigger_event_id, task)
 
         return self._tracer.trace_id
+
+    async def cancel_processing(
+        self,
+        session_id: SessionId,
+        trigger_event_id: EventId,
+    ) -> Literal["cancelled", "already_finished", "not_current"]:
+        await self._session_store.read_session(session_id)
+
+        async with self._processing_tasks_lock:
+            current = self._processing_tasks.get(session_id)
+            if not current or current[0] != trigger_event_id:
+                return "not_current"
+            if current[1].done():
+                return "already_finished"
+
+            await self._background_task_service.cancel(
+                tag=f"process-session({session_id})",
+                reason=f"Cancelled for trigger event {trigger_event_id}",
+            )
+            return "cancelled"
 
     async def _process_session(self, session: Session) -> None:
         event_emitter = await self._event_emitter_factory.create_event_emitter(

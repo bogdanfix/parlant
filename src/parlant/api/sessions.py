@@ -17,7 +17,7 @@ from enum import Enum
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import Field
-from typing import Annotated, AsyncIterator, Mapping, Sequence, TypeAlias, Union, cast
+from typing import Annotated, AsyncIterator, Literal, Mapping, Sequence, TypeAlias, Union, cast
 
 
 from parlant.api.authorization import AuthorizationPolicy, Operation
@@ -362,6 +362,14 @@ class EventCreationParamsDTO(
     guidelines: list[AgentMessageGuidelineDTO] | None = None
     participant: ParticipantDTO | None = None
     status: SessionStatusDTO | None = None
+
+
+class ProcessingCancellationParamsDTO(DefaultBaseModel):
+    trigger_event_id: EventId = Field(alias="triggerEventId")
+
+
+class ProcessingCancellationResultDTO(DefaultBaseModel):
+    status: Literal["cancelled", "already_finished", "not_current"]
 
 
 EventIdPath: TypeAlias = Annotated[
@@ -1671,6 +1679,25 @@ def create_router(
             metadata=session.metadata,
             labels=session.labels,
         )
+
+    @router.post(
+        "/{session_id}/processing/cancel",
+        operation_id="cancel_session_processing",
+        response_model=ProcessingCancellationResultDTO,
+        responses={
+            status.HTTP_200_OK: {"description": "Current session processing cancellation result"},
+            status.HTTP_404_NOT_FOUND: {"description": "Session not found"},
+        },
+        **apigen_config(group_name=API_GROUP, method_name="cancel_processing"),
+    )
+    async def cancel_session_processing(
+        request: Request,
+        session_id: SessionIdPath,
+        params: ProcessingCancellationParamsDTO,
+    ) -> ProcessingCancellationResultDTO:
+        await authorization_policy.authorize(request=request, operation=Operation.UPDATE_SESSION)
+        result = await app.sessions.cancel_processing(session_id, params.trigger_event_id)
+        return ProcessingCancellationResultDTO(status=result)
 
     @router.post(
         "/{session_id}/events",
